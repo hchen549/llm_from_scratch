@@ -31,9 +31,10 @@ class SpeculativeDecoder:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
             print("Pad token set to EOS token")
 
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="cuda:0")
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32, device_map="cuda:0")
         model.eval()
         model.to(self.device)
 
@@ -54,6 +55,7 @@ class SpeculativeDecoder:
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
             print("Pad token set to EOS token")
 
         # TODO: Implement draft model initialization
@@ -61,7 +63,7 @@ class SpeculativeDecoder:
         # 2. Load the model with appropriate settings for inference
         # 3. Enable any optimizations that might help with performance
 
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="cuda:0")
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32, device_map="cuda:0")
         model.eval()
         model.to(self.device)
 
@@ -85,25 +87,21 @@ class SpeculativeDecoder:
         # 2. Extract only the new tokens (not including the input)
         # 3. Return the newly generated tokens
         # print(f"input_ids: {input_ids}")
+        with torch.no_grad():
+            draft_ids = self.draft_model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=input_ids.shape[1] + num_speculative_tokens,
+                do_sample=False,
+                pad_token_id=self.draft_tokenizer.pad_token_id,
+                eos_token_id=self.draft_tokenizer.eos_token_id,
+            )
 
-        draft_model_output = self.draft_model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=input_ids.shape[1] + num_speculative_tokens,
-            do_sample=True,
-            pad_token_id=self.draft_tokenizer.pad_token_id,
-            output_scores=True,
-            # output_attentions=True,
-            return_dict_in_generate=True,
-            
-        )
+        new_tokens = draft_ids[:, input_ids.shape[1]:]
+        return new_tokens
+    
 
-        # print(f"Draft model output: {draft_model_output}")
-
-        return draft_model_output
-
-
-    def verify_tokens_vectorized(self, input_ids: torch.Tensor, draft_model_outputs,
+    def verify_tokens_vectorized(self, input_ids: torch.Tensor, draft_ids: torch.Tensor,
                                attention_mask: torch.Tensor) -> Tuple[List[int], int]:
         """
         Vectorized verification: verify all draft tokens in one forward pass using the target model.
@@ -125,42 +123,34 @@ class SpeculativeDecoder:
 
         # print(f"input_ids: {input_ids}")
         # print(f"current attention mask: {attention_mask}")
-        draft_tokens = draft_model_outputs.sequences[:, input_ids.shape[1]:]
-        # draft_logits = draft_model_outputs.scores[:, -draft_tokens.shape[1]:, :]
-
+       
 
         # print(f"decoded draft tokens: {self.draft_tokenizer.decode(draft_model_outputs.sequences[0], skip_special_tokens=True)}")
-        concat_input = torch.cat([input_ids, draft_tokens], dim=1)
+        concat_input = torch.cat([input_ids, draft_ids], dim=1)
+        
+        with torch.no_grad():
+            target_model_output = self.target_model(
+                input_ids=concat_input,
+                attention_mask=torch.cat([attention_mask, attention_mask.new_ones(draft_ids.shape)], dim=1),
+            )
 
-        target_model_output = self.target_model(
-            input_ids=concat_input,
-            attention_mask=torch.cat([attention_mask, attention_mask.new_ones(draft_tokens.shape)], dim=1),
-            return_dict=True
-        )
+        # print(f"target model output: {target_model_output}")
+        # print(f"target logits shape: {target_model_output.logits.shape}")
 
-        target_logits = target_model_output.logits[:, -draft_tokens.shape[1]:, :]
-        stacked_draft_logits = torch.stack(draft_model_outputs.scores, dim=1)
+        target_logits = target_model_output.logits[:, input_ids.shape[1]-1: -1, :]
+        target_id = torch.argmax(target_logits, dim=-1)
 
-        P_target = F.softmax(target_logits, dim=-1) # Shape: [1, k, vocab_size]
-        P_draft = F.softmax(stacked_draft_logits, dim=-1) # Shape: [1, k, vocab_size]
-       
-        match = True
-        current_index = 0
-        while match and current_index < draft_tokens.shape[1]:
-            # print(f"target model probabilities: {P_target[:, current_index, draft_tokens[:, current_index]]}")
-            # print(f"draft model probabilities: {P_draft[:, current_index, draft_tokens[:, current_index]]}")
-            r = 0.01 * torch.rand(1, device=self.device)
-            if r < min(1, P_target[:, current_index, draft_tokens[:, current_index]]/P_draft[:, current_index, draft_tokens[:, current_index]]):
-            # if P_target[:, current_index, draft_tokens[:, current_index]] > P_draft[:, current_index, draft_tokens[:, current_index]]:
-                match = True
-                current_index += 1
+        accepted_position = 0
+        for i in range(target_id.shape[1]):
+            if target_id[:, i] == draft_ids[:, i]:
+                accepted_position += 1
             else:
-                match = False
-
-        return draft_tokens[:current_index + 1], current_index 
+                break
+           
+        return target_id[:, :accepted_position], accepted_position
     
     def speculative_decode(self, prompt: str, max_tokens: int = 100,
-                          num_speculative_tokens: int = 2) -> str:
+                          num_speculative_tokens: int = 5) -> str:
         """
         Main speculative decoding algorithm with vectorized verification.
 
@@ -191,43 +181,39 @@ class SpeculativeDecoder:
         # 4. For rejected tokens or if all tokens are accepted, generate a new token with the target model
         # 5. Stop when max_tokens is reached or an EOS token is generated
 
-        target_input_ids = input_ids
         while total_tokens_generated < max_tokens + prompt_length:
-        #     draft_output = self.generate_draft_tokens(input_ids, attention_mask, num_speculative_tokens)
+            draft_ids = self.generate_draft_tokens(input_ids, attention_mask, num_speculative_tokens)
+           
+            total_draft_tokens_proposed += draft_ids.shape[1]
 
-        #     # total_tokens_generated += draft_output.sequences.shape[1] - input_ids.shape[1]
-        #     # input_ids = draft_output.sequences
-        #     # attention_mask = torch.ones_like(input_ids)
+            accepted_tokens, accepted_position = self.verify_tokens_vectorized(input_ids, draft_ids, attention_mask)
 
-        #     accepted_tokens, accepted_position = self.verify_tokens_vectorized(input_ids, draft_output, attention_mask)
-
-        #     total_draft_tokens_proposed += draft_output.sequences.shape[1] - input_ids.shape[1]
-        #     total_draft_tokens_accepted += accepted_position
-        #     total_tokens_generated += accepted_position
-        #     print(f"new tokens generated length : {accepted_position}")
-
-        # # print(f"total_draft_tokens_proposed: {total_draft_tokens_proposed}")
-        # # print(f"total_draft_tokens_accepted: {total_draft_tokens_accepted}")
-
-        #     target_input_ids = torch.cat([input_ids, accepted_tokens], dim=1)
-
-            target_model_output = self.target_model.generate(
-                input_ids=target_input_ids,
-                attention_mask=torch.ones_like(target_input_ids),
-                max_new_tokens=1,
-                do_sample=True,
-                pad_token_id=self.target_tokenizer.pad_token_id,
-                return_dict_in_generate=True,
-            )
+            total_draft_tokens_accepted += accepted_position
+            total_tokens_generated += accepted_position
             
-            total_tokens_generated += 1
-            target_input_ids = target_model_output.sequences
+            if accepted_position == 0:
+                target_input_ids = input_ids
+            else:
+                target_input_ids = torch.cat([input_ids, accepted_tokens], dim=1)
 
-            # total_tokens_generated += 1
-            # input_ids = target_model_output.sequences
-            # attention_mask = torch.ones_like(input_ids) 
+            if accepted_position == draft_ids.shape[1]:
+                # All draft tokens accepted, generate next token with target model
+                input_ids = target_input_ids
+                attention_mask = torch.ones_like(input_ids)
+            else:
+                with torch.no_grad():
+                    target_model_output = self.target_model.generate(
+                        input_ids=target_input_ids,
+                        attention_mask=torch.ones_like(target_input_ids),
+                        max_new_tokens=1,
+                        do_sample=False,
+                        pad_token_id=self.target_tokenizer.pad_token_id,
+                    )
 
-              
+                total_tokens_generated += 1
+                input_ids = target_model_output
+                attention_mask = torch.ones_like(input_ids)  
+    
 
         # Calculate performance metrics
         elapsed_time = time.time() - start_time
@@ -281,7 +267,7 @@ class SpeculativeDecoder:
                         input_ids,
                         attention_mask=attention_mask,
                         max_length=input_ids.shape[1] + max_tokens,
-                        do_sample=True,
+                        do_sample=False,
                         pad_token_id=self.target_tokenizer.pad_token_id,
                         return_dict_in_generate=True
                     )
