@@ -92,8 +92,6 @@ class ColumnParallelLinear(nn.Module):
             if self.shard_weight.grad is not None:
                 self.shard_weight.data -= self.shard_weight.grad * learning_rate
 
-        self.gather_weights()
-
     def gather_weights(self):
         shard_list = [torch.empty_like(self.shard_weight) for _ in range(self.world_size)]
         torch.distributed.all_gather(shard_list, self.shard_weight.contiguous()) # ensure contiguous
@@ -129,6 +127,7 @@ def column_parallel_mlp_pass(x, y_label, in_features, out_features, parallel_con
         loss = (y_pred - y_label).pow(2).mean()
         loss.backward()
         model.update_weights(learning_rate)
+    model.gather_weights()
     return model
 
 # ------------- CORRECTED compare_models FUNCTION -------------
