@@ -32,3 +32,40 @@ class Gather(torch.autograd.Function):
             return grad_chunk_list[dist.get_rank()].contiguous()
         else:
             return grad_output
+        
+class Scatter(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        # x: (bs, in_features)
+        if dist.get_world_size() > 1:
+            assert x.shape[1] % dist.get_world_size() == 0, "x must be divisible by tp_size"
+            x_chunk_list = torch.split(x, x.shape[1] // dist.get_world_size(), dim = -1)
+            x_chunk = x_chunk_list[dist.get_rank()].contiguous()
+            return x_chunk
+        
+        else:
+            return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if dist.get_world_size() > 1:
+            grad_output_chunk_list = [torch.empty_like(grad_output) for _ in range(dist.get_world_size())]
+            dist.all_gather(grad_output_chunk_list, grad_output)
+            return torch.cat(grad_output_chunk_list, dim=-1) # (bs, in_features/n) -> (bs, in_features)
+        else:
+            return grad_output
+    
+class Reduce(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        # x: (bs, out_features)
+        if dist.get_world_size() > 1:
+            dist.all_reduce(x, op=dist.ReduceOp.SUM)
+            return x
+        else:
+            return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output
+    

@@ -29,12 +29,19 @@ def column_mlp_pass(x, y_label, model, optimizer):
     model.merge_weights()
     if dist.get_rank() == 0:
         print(f"model.weight.shape: {model.weight.shape}")
-        
+
     return model
 
-def init_models(in_features, out_features, parallel_config, device):
+def init_models(in_features, out_features, parallel_config, device, tp_type):
     # non_tp_mlp = ColumnParallelLinear(in_features=in_features, out_features=out_features, parallel_config={'tp_size': 1, 'tp_rank': 0})
-    tp_mlp = ColumnParallelLinear(in_features=in_features, out_features=out_features, parallel_config=parallel_config, device=device)
+    if tp_type == 'column':
+        print("Initializing column parallel MLP")
+        tp_mlp = ColumnParallelLinear(in_features=in_features, out_features=out_features, parallel_config=parallel_config, device=device)
+    elif tp_type == 'row':
+        print("Initializing row parallel MLP")
+        tp_mlp = RowParallelLinear(in_features=in_features, out_features=out_features, parallel_config=parallel_config, device=device)
+    else:
+        raise ValueError(f"Invalid tp_type: {tp_type}")
 
     # non_tp_mlp.reset_parameters()
     tp_mlp.reset_parameters()
@@ -67,7 +74,7 @@ def compare_models(rank, world_size):
     dist.broadcast(x, src=0)
     dist.broadcast(y_label, src=0)
 
-    tp_mlp = init_models(in_features=in_features, out_features=out_features, parallel_config={'tp_size': world_size, 'tp_rank': rank}, device=device)
+    tp_mlp = init_models(in_features=in_features, out_features=out_features, parallel_config={'tp_size': world_size, 'tp_rank': rank}, device=device, tp_type='row')
     # optimizer = torch.optim.SGD(non_tp_mlp.parameters(), lr=0.01)
     optimizer_tp = torch.optim.SGD(tp_mlp.parameters(), lr=0.01)
 
