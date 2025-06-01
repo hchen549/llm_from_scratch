@@ -7,13 +7,14 @@ from tensor_parallelism.autograd_functions import Copy, Gather, Scatter, Reduce
 
 class ColumnParallelLinear(nn.Module):
 
-    def __init__(self, in_features, out_features, parallel_config: dict, device):
+    def __init__(self, in_features, out_features, parallel_config: dict, device, gather_output=True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.tp_size = parallel_config['tp_size']
         self.tp_rank = parallel_config['tp_rank']
         self.device = device
+        self.gather_output = gather_output
 
         assert out_features % self.tp_size == 0, "out_features must be divisible by tp_size"
         out_features_per_rank = out_features // self.tp_size
@@ -23,7 +24,8 @@ class ColumnParallelLinear(nn.Module):
     def forward(self, x):
         x = Copy.apply(x)
         x = F.linear(x, self.weight)
-        x = Gather.apply(x)
+        if self.gather_output:
+            x = Gather.apply(x)
         return x
     
     def init_weights(self):
@@ -45,14 +47,15 @@ class ColumnParallelLinear(nn.Module):
     
 class RowParallelLinear(nn.Module):
 
-    def __init__(self, in_features, out_features, parallel_config: dict, device):
+    def __init__(self, in_features, out_features, parallel_config: dict, device, scatter_input=True):
         super().__init__()
-        
+        self.in_features = in_features
+        self.out_features = out_features
         self.tp_size = parallel_config['tp_size']
         self.tp_rank = parallel_config['tp_rank']
         self.device = device
-        self.in_features = in_features
-        self.out_features = out_features
+        self.scatter_input = scatter_input
+        
         assert in_features % self.tp_size == 0, "out_features must be divisible by tp_size"
         self.in_features_per_rank = in_features // self.tp_size
 
@@ -60,7 +63,8 @@ class RowParallelLinear(nn.Module):
         
 
     def forward(self, x):
-        x = Scatter.apply(x)
+        if self.scatter_input:
+            x = Scatter.apply(x)
         x = F.linear(x, self.weight)
         x = Reduce.apply(x)
         return x
