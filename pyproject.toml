@@ -1,0 +1,43 @@
+[project]
+name = "llm-from-scratch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "debugpy>=1.8.14",
+    "medusa-llm>=0.1",
+]
+
+
+[dependency-groups]
+gpu = [
+  "accelerate>=1.2.1,<2.0.0",
+  "click>=8.1.8,<9.0.0",
+  "datasets>=3.2.0,<4.0.0",
+  "gcsfs~=2024.2.0",
+  "google-cloud-storage>=2.18.0,<3.0.0",
+  "langchain>=0.2.17",
+  "langchain-openai>=0.1.25",
+  "peft>=0.14.0,<0.15.0",
+  "transformers>=4.48.0,<5.0.0",
+  "bitsandbytes>=0.45.1",
+  "trl>=0.13.0,<0.14.0",
+  "vllm==0.6.6.post1",
+  "torch>=2.5.1",
+  "torchvision>=0.20.1"
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu118", marker = "platform_system != 'Darwin'"},
+]
+torchvision = [
+  { index = "pytorch-cu118", marker = "platform_system != 'Darwin'"},
+]
+vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.6.6.post1/vllm-0.6.6.post1+cu118-cp38-abi3-manylinux1_x86_64.whl", marker = "platform_system != 'Darwin'"}
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
