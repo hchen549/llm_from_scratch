@@ -83,7 +83,7 @@ class RowParallelLinear(nn.Module):
     
 class TPEmbedding(nn.Module):
 
-    def __init__(self, num_embeddings, embedding_dim, parallel_config: dict, device):
+    def __init__(self, num_embeddings, embedding_dim, parallel_config: dict):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
@@ -91,21 +91,29 @@ class TPEmbedding(nn.Module):
         self.tp_rank = parallel_config['tp_rank']
         self.start_index = self.num_embeddings // self.tp_size * self.tp_rank
         self.end_index = self.num_embeddings // self.tp_size * (self.tp_rank + 1)
-        self.device = device
+        self.device = "cuda:" + str(parallel_config['tp_rank'])
+        self.weight = nn.Parameter(torch.randn(self.num_embeddings//self.tp_size, self.embedding_dim, device=self.device))
 
     def forward(self, x): # (batch_size, seq_len) -> (batch_size, seq_len, embedding_dim)
+        # Create a mask for indices that belong to this rank's partition
         mask = (x >= self.start_index) & (x < self.end_index)
-        x[mask], x[~mask] = x[mask] - self.start_index, 0
-        x = F.embedding(x, self.weight) # (batch_size, seq_len, embedding_dim)
-        mask_expanded = mask.unsqueeze(-1)
-        x[~mask_expanded] = 0.0
-        x = Reduce.apply(x)
-        return x    
+        x[mask], x[~mask] = x[mask] - self.start_index, 0.0
         
-    def reset_parameters(self):
-        weight = nn.Parameter(torch.randn(self.num_embeddings, self.embedding_dim, device=self.device))
-        dist.broadcast(weight, src=0)
-        self.weight.data.copy_(weight[self.start_index:self.end_index, :]) # (vocab_size//n, embedding_dim) 
+        output = F.embedding(x, self.weight) # (batch_size, seq_len, embedding_dim)
+        # Zero out embeddings for indices not belonging to this rank
+        mask_expanded = mask.unsqueeze(-1).expand_as(output)
+        output[~mask_expanded] = 0.0
+        output = Reduce.apply(output)
+        return output
+        
+    def reset_parameters(self, weight=None):
+        if weight is None:
+            weight = nn.Parameter(torch.randn(self.num_embeddings, self.embedding_dim, device=self.device))
+            dist.broadcast(weight, src=0)
+            self.weight.data.copy_(weight[self.start_index:self.end_index, :]) # (vocab_size//n, embedding_dim) 
+        else:
+            assert weight.shape == (self.num_embeddings, self.embedding_dim), "Weight shape must match"
+            self.weight.data.copy_(weight[self.start_index:self.end_index, :])
 
     def merge_weights(self):
         weights_list = [torch.empty_like(self.weight) for _ in range(self.tp_size)]
