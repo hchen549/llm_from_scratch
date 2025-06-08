@@ -80,3 +80,35 @@ class RowParallelLinear(nn.Module):
 
         self.weight = nn.Parameter(torch.cat(weights_list, dim=-1)) # (out_features, in_features/n) -> (out_features, in_features)
         return self.weight
+    
+class TPEmbedding(nn.Module):
+
+    def __init__(self, num_embeddings, embedding_dim, parallel_config: dict, device):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.tp_size = parallel_config['tp_size']
+        self.tp_rank = parallel_config['tp_rank']
+        self.start_index = self.num_embeddings // self.tp_size * self.tp_rank
+        self.end_index = self.num_embeddings // self.tp_size * (self.tp_rank + 1)
+        self.device = device
+
+    def forward(self, x): # (batch_size, seq_len) -> (batch_size, seq_len, embedding_dim)
+        mask = (x >= self.start_index) & (x < self.end_index)
+        x[mask], x[~mask] = x[mask] - self.start_index, 0
+        x = F.embedding(x, self.weight) # (batch_size, seq_len, embedding_dim)
+        mask_expanded = mask.unsqueeze(-1)
+        x[~mask_expanded] = 0.0
+        x = Reduce.apply(x)
+        return x    
+        
+    def reset_parameters(self):
+        weight = nn.Parameter(torch.randn(self.num_embeddings, self.embedding_dim, device=self.device))
+        dist.broadcast(weight, src=0)
+        self.weight.data.copy_(weight[self.start_index:self.end_index, :]) # (vocab_size//n, embedding_dim) 
+
+    def merge_weights(self):
+        weights_list = [torch.empty_like(self.weight) for _ in range(self.tp_size)]
+        dist.all_gather(weights_list, self.weight)
+        self.weight = nn.Parameter(torch.cat(weights_list, dim=0)) # (vocab_size//n, embedding_dim) -> (vocab_size, embedding_dim)
+        return self.weight
