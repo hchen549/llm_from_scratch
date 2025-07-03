@@ -35,7 +35,7 @@ def test_cross_entropy_bwd(shape, device=None, dtype=None):
     torch.allclose(input_expected.grad, input_custom.grad, atol = 1e-5)
 
 def main():
-    shape = (16 * 24, 3)
+    shape = (16 * 24, 512)
     test_cross_entropy_fwd(shape, device = "cuda:0")
     test_cross_entropy_bwd(shape, device = "cuda:0")
 
