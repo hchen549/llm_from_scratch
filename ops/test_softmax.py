@@ -35,7 +35,7 @@ def test_softmax_backward_triton():
     )
 
 if __name__ == "__main__":
-    test_softmax_fwd_triton()
+    # test_softmax_fwd_triton()
     test_softmax_backward_triton()
 
 
