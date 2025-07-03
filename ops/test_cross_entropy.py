@@ -14,7 +14,7 @@ def test_cross_entropy_fwd(shape, device=None, dtype=None):
     input, labels = get_test_data(shape, device, dtype)
     cross_entropy = CrossEntropyTriton()
     expected_output = nn.CrossEntropyLoss()(input, labels)
-    custom_output = cross_entropy.apply(input, labels)
+    custom_output = cross_entropy.apply(input, labels, "mean", True)
 
     print("custom_output", custom_output)
     print("custom_output mean", custom_output.mean())
@@ -30,12 +30,12 @@ def test_cross_entropy_bwd(shape, device=None, dtype=None):
     nn.CrossEntropyLoss()(input_expected, labels).backward()
 
     input_custom = input.clone().requires_grad_(True)
-    cross_entropy.apply(input_custom, labels).backward()
+    cross_entropy.apply(input_custom, labels, "mean", True).backward()
 
     torch.allclose(input_expected.grad, input_custom.grad, atol = 1e-5)
 
 def main():
-    shape = (16 * 24, 3)
+    shape = (16 * 24, 512)
     test_cross_entropy_fwd(shape, device = "cuda:0")
     test_cross_entropy_bwd(shape, device = "cuda:0")
 
