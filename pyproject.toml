@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "debugpy>=1.8.14",
     "medusa-llm>=0.1",
+    "llm-basics"
 ]
 
 
@@ -23,19 +24,13 @@ gpu = [
   "transformers>=4.48.0,<5.0.0",
   "bitsandbytes>=0.45.1",
   "trl>=0.13.0,<0.14.0",
-  "vllm==0.6.6.post1",
-  "torch>=2.5.1",
-  "torchvision>=0.20.1"
+  "torch~=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "torch~=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
 ]
 
 [tool.uv.sources]
-torch = [
-  { index = "pytorch-cu118", marker = "platform_system != 'Darwin'"},
-]
-torchvision = [
-  { index = "pytorch-cu118", marker = "platform_system != 'Darwin'"},
-]
-vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.6.6.post1/vllm-0.6.6.post1+cu118-cp38-abi3-manylinux1_x86_64.whl", marker = "platform_system != 'Darwin'"}
+llm-basics = { path = "./llm-basics", editable = true } 
+
 
 [[tool.uv.index]]
 name = "pytorch-cu118"

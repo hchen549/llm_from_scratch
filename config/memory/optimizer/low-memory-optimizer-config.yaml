@@ -1,0 +1,36 @@
+# Configuration file for CS336 Assignment 2 Systems Benchmark
+
+# Model configuration (parameters used in BasicsTransformerLM)
+model:
+  vocab_size: 100000
+  context_length: 256
+  d_model: 768
+  num_layers: 12
+  num_heads: 12
+  d_ff: 3072
+  rope_theta: 10000.0
+
+# Benchmark configuration
+benchmark:
+  batch_size: 4
+  forward_and_backward_pass: true
+  warmup_iterations: 5
+  num_iterations: 10
+  variable_length: false
+
+# Optimizer configuration
+optimizer:
+  learning_rate: 0.0001
+  foreach: false
+
+# Profiler configuration
+profiler:
+  enable_profiler: true
+  profiler_output_dir: "./profiler_traces"
+  profiler_trace_file: "trace.json"
+  memory_timeline_file: "memory_timeline.html"
+
+# System configuration
+system:
+  device: "cuda"
+  random_seed: 42
