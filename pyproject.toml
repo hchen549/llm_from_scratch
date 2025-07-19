@@ -29,7 +29,7 @@ gpu = [
 ]
 
 [tool.uv.sources]
-llm-basics = { path = "./llm-basics", editable = true } 
+llm-basics = { path = "./llm_basics", editable = true } 
 
 
 [[tool.uv.index]]

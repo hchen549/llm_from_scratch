@@ -56,6 +56,12 @@ class SystemConfig:
 
 
 @dataclass
+class TritonConfig:
+    """Configuration for Triton kernel settings."""
+    rms: bool = False
+
+
+@dataclass
 class BenchmarkConfiguration:
     """Complete benchmark configuration containing all parameter groups."""
     model: ModelConfig
@@ -63,6 +69,7 @@ class BenchmarkConfiguration:
     optimizer: OptimizerConfig
     profiler: ProfilerConfig
     system: SystemConfig
+    triton: TritonConfig
 
     @classmethod
     def from_defaults(cls) -> "BenchmarkConfiguration":
@@ -72,7 +79,8 @@ class BenchmarkConfiguration:
             benchmark=BenchmarkConfig(),
             optimizer=OptimizerConfig(),
             profiler=ProfilerConfig(),
-            system=SystemConfig()
+            system=SystemConfig(),
+            triton=TritonConfig()
         )
 
     @classmethod
@@ -93,7 +101,8 @@ class BenchmarkConfiguration:
             benchmark=get_or_default(config_dict, 'benchmark', BenchmarkConfig),
             optimizer=get_or_default(config_dict, 'optimizer', OptimizerConfig),
             profiler=get_or_default(config_dict, 'profiler', ProfilerConfig),
-            system=get_or_default(config_dict, 'system', SystemConfig)
+            system=get_or_default(config_dict, 'system', SystemConfig),
+            triton=get_or_default(config_dict, 'triton', TritonConfig)
         )
 
     def to_dict(self) -> dict:
@@ -128,6 +137,9 @@ class BenchmarkConfiguration:
             'system': {
                 'device': self.system.device,
                 'random_seed': self.system.random_seed,
+            },
+            'triton': {
+                'rms': self.triton.rms,
             }
         }
 
@@ -178,6 +190,7 @@ class BenchmarkConfiguration:
         logger.info(f"  Optimizer: learning_rate={self.optimizer.learning_rate}, foreach={self.optimizer.foreach}")
         logger.info(f"  Profiler: enable={self.profiler.enable_profiler}, output_dir={self.profiler.profiler_output_dir}")
         logger.info(f"  System: random_seed={self.system.random_seed}")
+        logger.info(f"  Triton: rms={self.triton.rms}")
 
 
 def load_config_from_file(config_path: Optional[str] = None) -> BenchmarkConfiguration:

@@ -1,5 +1,3 @@
-# Configuration file for CS336 Assignment 2 Systems Benchmark
-
 # Model configuration (parameters used in BasicsTransformerLM)
 model:
   vocab_size: 100000
@@ -12,20 +10,20 @@ model:
 
 # Benchmark configuration
 benchmark:
-  batch_size: 4
-  forward_and_backward_pass: true
-  warmup_iterations: 5
-  num_iterations: 10
+  batch_size: 48
+  forward_and_backward_pass: false
+  warmup_iterations: 50
+  num_iterations: 100
   variable_length: false
 
 # Optimizer configuration
 optimizer:
   learning_rate: 0.0001
-  foreach: false # load small/separete kernel during optimizer step
+  foreach: true
 
 # Profiler configuration
 profiler:
-  enable_profiler: true
+  enable_profiler: false
   profiler_output_dir: "./profiler_traces"
   profiler_trace_file: "trace.json"
   memory_timeline_file: "memory_timeline.html"
@@ -34,3 +32,7 @@ profiler:
 system:
   device: "cuda"
   random_seed: 42
+
+# Triton configuration
+triton:
+  rms: true
