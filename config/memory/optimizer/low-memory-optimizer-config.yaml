@@ -21,7 +21,7 @@ benchmark:
 # Optimizer configuration
 optimizer:
   learning_rate: 0.0001
-  foreach: false
+  foreach: false # load small/separete kernel during optimizer step
 
 # Profiler configuration
 profiler:

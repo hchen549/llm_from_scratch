@@ -12,6 +12,8 @@ import click
 import sys
 from pathlib import Path
 
+from llm_basics.cs336_basics.model_patch import apply_triton_kernel
+
 # Add parent directory to path to import config modules
 sys.path.append(str(Path(__file__).parent.parent))
 try:
@@ -80,6 +82,8 @@ def run_benchmark(cfg) -> None:
         rope_theta=cfg.model.rope_theta,
     )
     model.to("cuda")
+    apply_triton_kernel(model, rms = True)
+    print(model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optimizer.learning_rate, foreach=cfg.optimizer.foreach)
     
     dummy_inputs = []

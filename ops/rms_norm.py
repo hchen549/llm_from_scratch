@@ -11,9 +11,11 @@ class RmsNormPytorch(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         pass
+
+
     
 
-class RmsNormTriton(torch.autograd.Function):
+class RmsNormTritonFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, eps = 1e-5):
         x_shape = x.shape
