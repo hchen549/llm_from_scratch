@@ -82,7 +82,7 @@ def run_benchmark(cfg) -> None:
         rope_theta=cfg.model.rope_theta,
     )
     model.to("cuda")
-    apply_triton_kernel(model, rms = True)
+    apply_triton_kernel(model, rms = cfg.triton.rms)
     print(model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optimizer.learning_rate, foreach=cfg.optimizer.foreach)
     

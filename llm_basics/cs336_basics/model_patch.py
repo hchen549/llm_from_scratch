@@ -5,7 +5,7 @@ from cs336_basics.model_triton import RMSNormTriton  # Assuming this is the corr
 
 
 
-def apply_triton_kernel(model, rms):
+def apply_triton_kernel(model, rms=False):
     if rms:
         replace_rms_norm_with_triton(model)
     return model
