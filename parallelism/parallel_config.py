@@ -33,8 +33,6 @@ class ParallelConfig:
         self.pp_group = self.grid[self.dp_rank, :, self.tp_rank].tolist()
         self.dp_group = self.grid[:, self.pp_rank, self.tp_rank].tolist()
         
-    
-
     def __repr__(self):
         return (f"ParallelConfig(global_rank={self.global_rank}, world_size={self.world_size}, "
                 f"tp={self.tp}[rank={self.tp_rank}], pp={self.pp}[rank={self.pp_rank}], "
@@ -44,20 +42,33 @@ class ParallelConfig:
         """Get the local rank for CUDA device assignment"""
         return int(os.environ.get('LOCAL_RANK', 0))
     
+    def cleanup(self):
+        """Properly destroy the process group to avoid resource leaks"""
+        if dist.is_initialized():
+            dist.destroy_process_group()
+    
+
+def setup_parallel_manager(config):
+    global process_group_manager 
+    process_group_manager = ParallelConfig(config)
 
 if __name__ == "__main__":
    
     config = {"tp": 2, "pp": 1, "dp": 2}
     
     try:
-        parallel_context = ParallelConfig(config)
-        print(f"Process {parallel_context.global_rank}: {parallel_context}")
+        setup_parallel_manager(config)
+        print(f"Process {process_group_manager.global_rank}: {process_group_manager}")
         
         # Set CUDA device based on local rank
-        local_rank = parallel_context.get_local_rank()
+        local_rank = process_group_manager.get_local_rank()
         torch.cuda.set_device(local_rank)
-        print(f"Process {parallel_context.global_rank} using GPU {local_rank}")
+        print(f"Process {process_group_manager.global_rank} using GPU {local_rank}")
         
     except Exception as e:
         print(f"Error initializing parallel config: {e}")
+    finally:
+        # Clean up the process group
+        if 'process_group_manager' in globals():
+            process_group_manager.cleanup()
 
