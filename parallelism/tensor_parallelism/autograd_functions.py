@@ -36,10 +36,10 @@ class Gather(torch.autograd.Function):
 class Scatter(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
-        # x: (bs, in_features)
+        # x: (..., in_features)
         if dist.get_world_size() > 1:
-            assert x.shape[1] % dist.get_world_size() == 0, "x must be divisible by tp_size"
-            x_chunk_list = torch.split(x, x.shape[1] // dist.get_world_size(), dim = -1)
+            assert x.shape[-1] % dist.get_world_size() == 0, "x must be divisible by tp_size"
+            x_chunk_list = torch.split(x, x.shape[-1] // dist.get_world_size(), dim = -1)
             x_chunk = x_chunk_list[dist.get_rank()].contiguous()
             return x_chunk
         
