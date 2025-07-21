@@ -3,16 +3,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from tensor_parallelism.autograd_functions import Copy, Gather, Scatter, Reduce
+from parallelism.tp.autograd_functions import Copy, Gather, Scatter, Reduce
+
+import parallelism.parallel_config as pcfg
 
 class ColumnParallelLinear(nn.Module):
 
-    def __init__(self, in_features, out_features, parallel_config: dict, device, gather_output=True):
+    def __init__(self, in_features, out_features, device, gather_output=True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.tp_size = parallel_config['tp_size']
-        self.tp_rank = parallel_config['tp_rank']
+        self.tp_size = pcfg.process_group_manager.tp
+        self.tp_rank = pcfg.process_group_manager.tp_rank
         self.device = device
         self.gather_output = gather_output
 
@@ -42,17 +44,37 @@ class ColumnParallelLinear(nn.Module):
     def merge_weights(self):
         weights_list = [torch.empty_like(self.weight) for _ in range(dist.get_world_size())]
         dist.all_gather(weights_list, self.weight)
-        self.weight = nn.Parameter(torch.cat(weights_list, dim=0))   # (out_features/n, in_features) -> (out_features, in_features)
-        return self.weight
+        self.master_weight = nn.Parameter(torch.cat(weights_list, dim=0))   # (out_features/n, in_features) -> (out_features, in_features)
+        return self.master_weight
+    
+    def load_weights(self, shared_weight):
+        """Load weights from a shared (non-partitioned) weight tensor.
+        
+        Args:
+            shared_weights: Full weight tensor of shape (out_features, in_features)
+        """
+        # Handle both tensor and Parameter inputs
+        weight_data = shared_weight.data if hasattr(shared_weight, 'data') else shared_weight
+        
+        expected_shape = (self.out_features, self.in_features)
+        if weight_data.shape != expected_shape:
+            raise ValueError(f"Expected weight shape {expected_shape}, got {weight_data.shape}")
+
+        partition_size = self.out_features // self.tp_size
+        
+        start_idx = partition_size * self.tp_rank
+        end_idx = partition_size * (self.tp_rank + 1)
+
+        self.weight.data.copy_(weight_data[start_idx:end_idx, :])
     
 class RowParallelLinear(nn.Module):
 
-    def __init__(self, in_features, out_features, parallel_config: dict, device, scatter_input=True):
+    def __init__(self, in_features, out_features, device, scatter_input=True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.tp_size = parallel_config['tp_size']
-        self.tp_rank = parallel_config['tp_rank']
+        self.tp_size = pcfg.process_group_manager.tp
+        self.tp_rank = pcfg.process_group_manager.tp_rank
         self.device = device
         self.scatter_input = scatter_input
         
@@ -78,20 +100,31 @@ class RowParallelLinear(nn.Module):
         weights_list = [torch.empty_like(self.weight) for _ in range(self.tp_size)]
         dist.all_gather(weights_list, self.weight)
 
-        self.weight = nn.Parameter(torch.cat(weights_list, dim=-1)) # (out_features, in_features/n) -> (out_features, in_features)
-        return self.weight
+        self.master_weight = nn.Parameter(torch.cat(weights_list, dim=-1)) # (out_features, in_features/n) -> (out_features, in_features)
+        return self.master_weight
+
+    def load_weights(self, shared_weight):
+        weight_data = shared_weight.data if hasattr(shared_weight, "data") else shared_weight
+
+        assert weight_data.shape == (self.out_features, self.in_features), "miss match in weight shape"
+
+        partition_size = self.in_features // self.tp_size
+        start_idx = partition_size * self.tp_rank
+        end_idx = partition_size * self.tp_rank + partition_size
+
+        self.weight.data.copy_(weight_data[:, start_idx:end_idx])
     
 class TPEmbedding(nn.Module):
 
-    def __init__(self, num_embeddings, embedding_dim, parallel_config: dict):
+    def __init__(self, num_embeddings, embedding_dim):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        self.tp_size = parallel_config['tp_size']
-        self.tp_rank = parallel_config['tp_rank']
+        self.tp_size = pcfg.process_group_manager.tp
+        self.tp_rank = pcfg.process_group_manager.tp_rank
         self.start_index = self.num_embeddings // self.tp_size * self.tp_rank
         self.end_index = self.num_embeddings // self.tp_size * (self.tp_rank + 1)
-        self.device = "cuda:" + str(parallel_config['tp_rank'])
+        self.device = "cuda:" + str(pcfg.process_group_manager.global_rank)
         self.weight = nn.Parameter(torch.randn(self.num_embeddings//self.tp_size, self.embedding_dim, device=self.device))
 
     def forward(self, x): # (batch_size, seq_len) -> (batch_size, seq_len, embedding_dim)
