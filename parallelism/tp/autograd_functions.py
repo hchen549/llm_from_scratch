@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
+import parallelism.parallel_config as pcfg
+
 class Copy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
