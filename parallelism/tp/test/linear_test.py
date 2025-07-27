@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 @dataclass
-class TestConfig:
+class TestDataConfig:
     batch_size: int = 4
     in_features: int = 20
     out_features: int = 20
@@ -58,9 +58,9 @@ def init_models(in_features, out_features, device, tp_type, shared_weight = None
     return tp_mlp
 
 
-def compare_models(tp_type, config: TestConfig = None, seed = 42):
+def compare_models(tp_type, config: TestDataConfig = None, seed = 42):
     if config is None:
-        config = TestConfig()
+        config = TestDataConfig()
         
     torch.manual_seed(seed) # Seed for CPU operations
     torch.cuda.manual_seed(seed) # Seed current CUDA device
@@ -121,5 +121,5 @@ def test_row_parallel():
     compare_models(tp_type="row", seed = 2025)
 
 if __name__ == "__main__":
-    # test_column_parallel()
-    test_row_parallel()
+    test_column_parallel()
+    # test_row_parallel()

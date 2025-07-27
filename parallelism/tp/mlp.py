@@ -115,7 +115,6 @@ class RowParallelLinear(nn.Module):
         self.weight.data.copy_(weight_data[:, start_idx:end_idx])
     
 class TPEmbedding(nn.Module):
-
     def __init__(self, num_embeddings, embedding_dim):
         super().__init__()
         self.num_embeddings = num_embeddings
@@ -150,6 +149,6 @@ class TPEmbedding(nn.Module):
 
     def merge_weights(self):
         weights_list = [torch.empty_like(self.weight) for _ in range(self.tp_size)]
-        dist.all_gather(weights_list, self.weight)
+        dist.all_gather(weights_list, self.weight, group = pcfg.process_group_manager.tp_group)
         self.weight = nn.Parameter(torch.cat(weights_list, dim=0)) # (vocab_size//n, embedding_dim) -> (vocab_size, embedding_dim)
         return self.weight

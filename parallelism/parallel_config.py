@@ -32,7 +32,11 @@ class ParallelConfig:
         self.tp_group_ids = self.grid[self.dp_rank, self.pp_rank, :].tolist()
         self.pp_group_ids = self.grid[self.dp_rank, :, self.tp_rank].tolist()
         self.dp_group_ids = self.grid[:, self.pp_rank, self.tp_rank].tolist()
-        
+
+        self.tp_group = dist.new_group(self.tp_group_ids)
+        self.pp_group = dist.new_group(self.pp_group_ids)
+        self.dp_group = dist.new_group(self.dp_group_ids)
+
     def __repr__(self):
         return (f"ParallelConfig(global_rank={self.global_rank}, world_size={self.world_size}, "
                 f"tp={self.tp}[rank={self.tp_rank}], pp={self.pp}[rank={self.pp_rank}], "
