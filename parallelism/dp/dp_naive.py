@@ -43,6 +43,47 @@ class DDPOverlapIndividual(nn.Module):
 
     def finish_gradient_sync(self):
         self.wait()
+
+
+class DDPOverlapIndividual2(nn.Module):
+    def __init__(self, module: nn.Module):
+        super().__init__()
+        self.module = module
+        self.handles = []
+
+        self.params_with_grad = [param for param in self.module.parameters() if param.requires_grad]
+        self.grad_buffer = [torch.zeros_like(param) for param in self.params_with_grad]
+
+        self.register_grad_hook()
+
+    def forward(self, *inputs, **kwargs):
+        return self.module(*inputs, **kwargs)
+    
+    def sync_grad(self, index):
+        def hook(grad):
+            self.grad_buffer[index].data.copy_(grad)
+            handle = dist.all_reduce(self.grad_buffer[index], op=dist.ReduceOp.AVG, async_op=True)
+            self.handles.append(handle)
+            
+        return hook
+    
+    def register_grad_hook(self):
+        for i, param in enumerate(self.params_with_grad):
+            param.register_hook(self.sync_grad(index = i))
+        
+    def wait(self):
+        for handle in self.handles:
+            handle.wait()
+        for param, sync_grad in zip(self.params_with_grad, self.grad_buffer):
+            param.grad.data.copy_(sync_grad)
+
+        self.grad_buffer = [torch.zeros_like(param) for param in self.params_with_grad]
+        self.handles.clear()
+
+    def finish_gradient_sync(self):
+        self.wait()
+
+
     
 class DDPOverlapBucketed(nn.Module):
     

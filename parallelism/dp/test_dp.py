@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.distributed as dist
 
 from .toy_model import ToyModel
-from .dp_naive import DDP, DDPOverlapBucketed, DDPOverlapIndividual
+from .dp_naive import DDP, DDPOverlapBucketed, DDPOverlapIndividual, DDPOverlapIndividual2
 
 from dataclasses import dataclass
 
@@ -35,7 +35,7 @@ def main():
     x, y = get_batch(batch_size, model_config, device)
 
     model = ToyModel(in_features= model_config.in_features, out_features=model_config.out_features).to(device)
-    ddp_model = DDPOverlapIndividual(copy.deepcopy(model))
+    ddp_model = DDPOverlapIndividual2(copy.deepcopy(model))
 
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     ddp_optimizer = torch.optim.SGD(ddp_model.parameters(), lr=0.01)
