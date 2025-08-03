@@ -41,7 +41,7 @@ class BucketManager:
         self.id_to_param = {}
         self.buckets = []
         self.bucket_to_ready = {}
-        self.param_gradients = {}  # Store gradients as they come in
+       
         self._initialize_bucket()
 
     def _initialize_bucket(self):
@@ -65,9 +65,8 @@ class BucketManager:
             bucket = Bucket(params=self.id_to_param[i])
             self.buckets.append(bucket)  
 
-    def mark_param_as_ready(self, param, grad):
+    def mark_param_as_ready(self, param):
         # Store the gradient for this parameter
-        self.param_gradients[param] = grad
         
         bucket_id = self.param_to_bucket_id[param]
         bucket = self.buckets[bucket_id]
@@ -77,9 +76,8 @@ class BucketManager:
             offset = 0
             for param in bucket.params:
                 num_elements = param.numel()
-                # Use the stored gradient instead of param.grad
-                param_grad = self.param_gradients[param]
-                bucket.grad_buffer[offset:offset + num_elements].copy_(param_grad.view(-1))
+            
+                bucket.grad_buffer[offset:offset + num_elements].copy_(param.grad.view(-1))
                 offset += num_elements
             bucket.sync_grad()
            
@@ -94,9 +92,6 @@ class BucketManager:
                 offset += size
             bucket.reset()
         
-        # Clear stored gradients after synchronization
-        self.param_gradients.clear()
-
 
 
 

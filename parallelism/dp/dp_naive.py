@@ -101,10 +101,12 @@ class DDPOverlapBucketed(nn.Module):
     def register_hook(self):
         for param in self.module.parameters():
             if param.requires_grad:
-                param.register_hook(lambda grad, p=param: self.hook(p, grad))
+                param.register_post_accumulate_grad_hook(self._make_hook(param))
 
-    def hook(self, param, grad):
-        self.bucket_manager.mark_param_as_ready(param, grad)
+    def _make_hook(self, param):
+        def hook(*unused):
+            self.bucket_manager.mark_param_as_ready(param)
+        return hook
 
     def finish_gradient_sync(self):
         self.bucket_manager.wait()
