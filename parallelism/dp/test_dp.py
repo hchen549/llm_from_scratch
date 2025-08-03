@@ -35,7 +35,7 @@ def main():
     x, y = get_batch(batch_size, model_config, device)
 
     model = ToyModel(in_features= model_config.in_features, out_features=model_config.out_features).to(device)
-    ddp_model = DDPOverlapIndividual2(copy.deepcopy(model))
+    ddp_model = DDPOverlapBucketed(copy.deepcopy(model), bucket_size_mb=1000)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     ddp_optimizer = torch.optim.SGD(ddp_model.parameters(), lr=0.01)

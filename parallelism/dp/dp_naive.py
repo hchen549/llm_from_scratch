@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
+from .bucket import Bucket, BucketManager
+
 class DDP(nn.Module):
     def __init__(self, module: nn.Module):
         super().__init__()
@@ -90,4 +92,22 @@ class DDPOverlapBucketed(nn.Module):
     def __init__(self, module: nn.Module, bucket_size_mb: float):
         super().__init__()
         self.module = module
-        self.bucket_manager
+        self.bucket_manager = BucketManager(self.module.parameters(), bucket_size_mb)
+        self.register_hook()
+
+    def forward(self, *input, **kwargs):
+        return self.module(*input, **kwargs)
+    
+    def register_hook(self):
+        for param in self.module.parameters():
+            if param.requires_grad:
+                param.register_hook(lambda grad, p=param: self.hook(p, grad))
+
+    def hook(self, param, grad):
+        self.bucket_manager.mark_param_as_ready(param, grad)
+
+    def finish_gradient_sync(self):
+        self.bucket_manager.wait()
+        
+    
+
