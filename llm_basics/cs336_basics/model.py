@@ -184,6 +184,7 @@ class BasicsTransformerLM(nn.Module):
         num_heads: int,
         d_ff: int,
         rope_theta: float,
+        rms_norm_eps: float,
     ):
         # Store the model configuration for serialization / deserialization
         self.config = {
@@ -211,7 +212,7 @@ class BasicsTransformerLM(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-        self.ln_final = RMSNorm(d_model)
+        self.ln_final = RMSNorm(d_model, eps=rms_norm_eps)
         self.lm_head = Linear(d_model, vocab_size)
 
         # report number of parameters
