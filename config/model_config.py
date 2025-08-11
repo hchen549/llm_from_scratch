@@ -11,3 +11,4 @@ class LLamaConfig:
     d_model: int = 768,
     d_ff: int = 3072,
     rope_theta: float = 10000.0
+    rms_norm_eps: float = 1e-5
