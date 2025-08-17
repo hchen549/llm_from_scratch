@@ -32,17 +32,17 @@ class Llama3(BaseLLM):
                     d_ff=config.d_ff,
                     positional_encoder=self.positional_encoder,
                     use_grouped_query_attention=True,
+                    rms_norm_eps=config.rms_norm_eps,
                 )
                 for _ in range(config.num_layers)
             ]
         )
         self.ln_final = RMSNorm(config.d_model, eps = config.rms_norm_eps)
 
-        # if config.tie_word_embeddings:
-            # self.lm_head = self.token_embeddings
-        # else:
         self.lm_head = Linear(config.d_model, config.vocab_size)
-
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.token_embeddings.weight
+        
         logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.6f}M")
         logger.info(f"number of all parameters: {self.get_num_params(False) / 1e6:.6f}M")
         
@@ -55,3 +55,4 @@ class Llama3(BaseLLM):
         x = self.ln_final(x)
 
         return self.lm_head(x)
+    

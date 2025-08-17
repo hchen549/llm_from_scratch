@@ -12,11 +12,12 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from jaxtyping import Float, Bool, Int
-
+from transformers.models.llama.modeling_llama import LlamaRMSNorm as HFRMSNorm
 
 from .nn_utils import softmax
 
 logger = logging.getLogger(__name__)
+
 
 
 class Linear(nn.Module):
@@ -104,7 +105,8 @@ class RMSNorm(nn.Module):
         rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         x = x * rms
 
-        return (self.weight * x).to(in_dtype)
+        # Match HuggingFace's order: convert to dtype first, then multiply by weight
+        return self.weight * x.to(in_dtype)
     
     def extra_repr(self):
         return f"hidden_size={self.weight.shape[0]}, eps={self.eps}"
@@ -158,32 +160,49 @@ class RotaryPositionalEmbeddingPytorch(nn.Module):
         self.context_length = context_length
 
         assert d_model % 2 == 0
-        pair = torch.arange(0, d_model, 2).float()
-        freq = 1/theta ** (pair/d_model)
-        m = torch.arange(0, context_length)
-        angle = torch.outer(m, freq).float() # (max_seq, d_model/2)
+        
+        # Compute inverse frequencies
+        inv_freq = 1.0 / (self.theta ** (torch.arange(0, d_model, 2).float() / d_model))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+        # Build cache for all positions
+        self._build_cache(context_length, device)
 
-        # construct a complex tensor from given absolute values and angles
-        self.positional_encoding_complex = torch.polar(abs = torch.ones_like(angle), angle = angle )
-
-        self.register_buffer("_freq_cis_cache", self.positional_encoding_complex.to(device=device), persistent=False)
+    def _build_cache(self, seq_len, device):
+        # Build cos/sin cache for all positions
+        t = torch.arange(seq_len, device=device).float()
+        freqs = torch.outer(t, self.inv_freq.to(device))
+        
+        # Create cos and sin embeddings
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+    
+    @staticmethod
+    def rotate_half(x):
+        """Rotates half the hidden dims of the input."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor):
-        # we need token postions mostly since during the generation phase
-        x_shape = x.shape
+        # Get cos and sin for the given positions
+        if token_positions.dim() == 1:
+            # If 1D, it's a sequence of positions
+            cos = self.cos_cached[token_positions]
+            sin = self.sin_cached[token_positions]
+        else:
+            # If multi-dimensional, we need to handle it properly
+            # Flatten all but last dimension for indexing
+            shape = token_positions.shape
+            positions_flat = token_positions.flatten()
+            cos = self.cos_cached[positions_flat].view(*shape, -1)
+            sin = self.sin_cached[positions_flat].view(*shape, -1)
         
-        # the input of torch.view_as_complex is expected to have the last dimension of size 2
-        x_complex = torch.view_as_complex(x.reshape(*x_shape[:-1], -1, 2)) # (..., head_dim/2)
-
-        # Get the positional encoding for the given positions
-        freqs_cis = self._freq_cis_cache[token_positions] # (seq_len, head_dim/2)
+        # Apply rotary embedding using HuggingFace's approach
+        x_rotated = (x * cos) + (self.rotate_half(x) * sin)
         
-        x = x_complex * freqs_cis
-
-        x_real = torch.view_as_real(x)
-        x = x_real.reshape(*x_shape)
-
-        return x
+        return x_rotated
 
 
 class TransformerBlock(nn.Module):
@@ -215,6 +234,7 @@ class TransformerBlock(nn.Module):
         d_ff: int,
         positional_encoder: RotaryEmbedding | RotaryPositionalEmbeddingPytorch,
         use_grouped_query_attention: bool = False,
+        rms_norm_eps: float = 1e-6,
     ):
         super().__init__()
 
@@ -232,8 +252,10 @@ class TransformerBlock(nn.Module):
                 positional_encoder=positional_encoder,
             )
         self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff)
-        self.ln1 = RMSNorm(d_model)
-        self.ln2 = RMSNorm(d_model)
+        self.ln1 = RMSNorm(d_model, eps=rms_norm_eps)
+        self.ln2 = RMSNorm(d_model, eps=rms_norm_eps)
+
+        print(f"✅ TransformerBlock is using RMSNorm class: {self.ln1.__class__.__name__}")
 
     def forward(self, x: torch.Tensor):
         """
@@ -383,7 +405,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
         causal_mask = qi >= kj  # (query, key)
 
         # Shape: (..., num_heads, sequence_length, d_k)
-        attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        attn_output = scaled_dot_product_attention(Q=Q, K=K, V=V, mask=causal_mask)
 
         # Concatenate the attention output from all heads.
         # (..., sequence_length, num_heads * d_v).
@@ -427,14 +449,16 @@ class GroupedQueryAttention(nn.Module):
         k = k.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2) # (b, num_kv_heads, seq, d)
         v = v.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2) # (b, num_kv_heads, seq, d)
 
-        k = torch.repeat_interleave(k, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
-        v = torch.repeat_interleave(v, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
-
         if token_positions is None:
             token_positions = torch.arange(seq_len, device=x.device)
 
+        # Apply RoPE BEFORE repeating KV heads (following HuggingFace implementation)
         q = self.positional_encoder(q, token_positions = token_positions )
         k = self.positional_encoder(k, token_positions = token_positions )
+
+        # Repeat KV heads AFTER applying RoPE
+        k = torch.repeat_interleave(k, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
+        v = torch.repeat_interleave(v, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
 
         mask = 1 - torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1)
         mask = mask.bool()
