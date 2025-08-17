@@ -173,9 +173,12 @@ class RotaryPositionalEmbeddingPytorch(nn.Module):
         x_shape = x.shape
         
         # the input of torch.view_as_complex is expected to have the last dimension of size 2
-        x_complex = torch.view_as_complex(x.reshape(*x_shape[:-1], -1, 2)) # (..., seqlen, d_model/2)
+        x_complex = torch.view_as_complex(x.reshape(*x_shape[:-1], -1, 2)) # (..., head_dim/2)
 
-        x = x_complex * self._freq_cis_cache[token_positions] # (seqlen, d_model/2)
+        # Get the positional encoding for the given positions
+        freqs_cis = self._freq_cis_cache[token_positions] # (seq_len, head_dim/2)
+        
+        x = x_complex * freqs_cis
 
         x_real = torch.view_as_real(x)
         x = x_real.reshape(*x_shape)
@@ -413,19 +416,19 @@ class GroupedQueryAttention(nn.Module):
 
         self.positional_encoder = positional_encoder
 
-    def forward(self, x: torch.Tensor, token_positions):
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
         
         bsz, seq_len, _ = x.shape
         q = self.q_proj(x) # (b, seq, d_model)
         k = self.k_proj(x) # (b, seq, d_model/n_kv_heads)
         v = self.v_proj(x) # (b, seq, d_model/n_kv_heads)
 
-        q = q.view(bsz, seq_len, self.num_heads, self.head_dim)
-        k = k.view(bsz, seq_len, self.num_kv_heads, self.head_dim)
-        v = v.view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+        q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2) # (b, num_heads, seq, d)
+        k = k.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2) # (b, num_kv_heads, seq, d)
+        v = v.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2) # (b, num_kv_heads, seq, d)
 
-        k = torch.repeat_interleave(k, repeats = self.n_rep, dim = -2)
-        v = torch.repeat_interleave(v, repeats = self.n_rep, dim = -2)
+        k = torch.repeat_interleave(k, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
+        v = torch.repeat_interleave(v, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
 
         if token_positions is None:
             token_positions = torch.arange(seq_len, device=x.device)
@@ -433,12 +436,13 @@ class GroupedQueryAttention(nn.Module):
         q = self.positional_encoder(q, token_positions = token_positions )
         k = self.positional_encoder(k, token_positions = token_positions )
 
-
-        mask = 1 - torch.triu(torch.ones(seq_len, seq_len, device= self.device), diagonal=1)
+        mask = 1 - torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1)
         mask = mask.bool()
         
         attention = scaled_dot_product_attention(q, k, v, mask)
-        attention = attention.transpose(-2, -3).reshape(*x.shape[:-1], -1)
+        
+        # Transpose back and reshape
+        attention = attention.transpose(1, 2).reshape(bsz, seq_len, -1)
 
         output = self.output_proj(attention)
 

@@ -17,7 +17,11 @@ class Llama3(BaseLLM):
         self.vocab_size = config.vocab_size
     
         self.token_embeddings = Embedding(config.vocab_size, config.d_model)
-        self.positional_encoder = RotaryPositionalEmbeddingPytorch(context_length=config.context_length, d_model=config.d_model, theta=config.rope_theta)
+        self.positional_encoder = RotaryPositionalEmbeddingPytorch(
+            context_length=config.context_length, 
+            d_model=config.d_model // config.num_heads,  # Use head_dim instead of d_model
+            theta=config.rope_theta
+        )
 
         self.layers = nn.ModuleList(
             [
@@ -34,10 +38,10 @@ class Llama3(BaseLLM):
         )
         self.ln_final = RMSNorm(config.d_model, eps = config.rms_norm_eps)
 
-        if config.tie_word_embeddings:
-            self.lm_head = self.token_embeddings
-        else:
-            self.lm_head = Linear(config.d_model, config.vocab_size)
+        # if config.tie_word_embeddings:
+            # self.lm_head = self.token_embeddings
+        # else:
+        self.lm_head = Linear(config.d_model, config.vocab_size)
 
         logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.6f}M")
         logger.info(f"number of all parameters: {self.get_num_params(False) / 1e6:.6f}M")
