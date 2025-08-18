@@ -21,7 +21,7 @@ def get_parameter_mapping(model_config, hf_to_custom):
         hf_to_custom_layer_mapping[f"model.layers.{layer_i}.self_attn.q_proj.weight"] = f"layers.{layer_i}.attn.q_proj.weight"
         hf_to_custom_layer_mapping[f"model.layers.{layer_i}.self_attn.k_proj.weight"] = f"layers.{layer_i}.attn.k_proj.weight"
         hf_to_custom_layer_mapping[f"model.layers.{layer_i}.self_attn.v_proj.weight"] = f"layers.{layer_i}.attn.v_proj.weight"
-        hf_to_custom_layer_mapping[f"model.layers.{layer_i}.self_attn.o_proj.weight"] = f"layers.{layer_i}.attn.output_proj.weight"
+        hf_to_custom_layer_mapping[f"model.layers.{layer_i}.self_attn.o_proj.weight"] = f"layers.{layer_i}.attn.o_proj.weight"
 
         hf_to_custom_layer_mapping[f"model.layers.{layer_i}.mlp.gate_proj.weight"] = f"layers.{layer_i}.ffn.w1.weight"
         hf_to_custom_layer_mapping[f"model.layers.{layer_i}.mlp.up_proj.weight"] = f"layers.{layer_i}.ffn.w3.weight"
@@ -63,7 +63,8 @@ def load_hf_model():
     hf_model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.2-1B-Instruct", 
         torch_dtype=torch.bfloat16,
-        device_map = "cuda:0"
+        device_map = "cuda:0",
+        attention_implementation = "eager"
     )
     hf_model_cfg = hf_model.config
 
@@ -198,6 +199,29 @@ class HiddenStateExtractor:
             )
             self.hooks.append(hook)
             
+            # Add fine-grained attention hooks
+            # Q, K, V projections
+            hook = layer.self_attn.q_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_q_proj")
+            )
+            self.hooks.append(hook)
+            
+            hook = layer.self_attn.k_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_k_proj")
+            )
+            self.hooks.append(hook)
+            
+            hook = layer.self_attn.v_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_v_proj")
+            )
+            self.hooks.append(hook)
+            
+            # Output projection
+            hook = layer.self_attn.o_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_o_proj")
+            )
+            self.hooks.append(hook)
+            
             # Capture post_attention_layernorm output (equivalent to ln2)
             hook = layer.post_attention_layernorm.register_forward_hook(
                 make_hook(f"layer_{i}_ln2")
@@ -269,6 +293,28 @@ class HiddenStateExtractor:
             # Capture attention output (before residual)
             hook = layer.attn.register_forward_hook(
                 make_hook(f"layer_{i}_attn")
+            )
+            self.hooks.append(hook)
+            
+            # Add fine-grained attention hooks
+            # Q, K, V projections
+            hook = layer.attn.q_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_q_proj")
+            )
+            self.hooks.append(hook)
+            
+            hook = layer.attn.k_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_k_proj")
+            )
+            self.hooks.append(hook)
+            
+            hook = layer.attn.v_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_v_proj")
+            )
+            self.hooks.append(hook)
+            
+            hook = layer.attn.o_proj.register_forward_hook(
+                make_hook(f"layer_{i}_attn_o_proj")
             )
             self.hooks.append(hook)
             
@@ -474,6 +520,10 @@ def test_model(hf_model, model):
                 components = [
                     f"layer_{layer_idx}_input",
                     f"layer_{layer_idx}_ln1", 
+                    f"layer_{layer_idx}_attn_q_proj",
+                    f"layer_{layer_idx}_attn_k_proj",
+                    f"layer_{layer_idx}_attn_v_proj",
+                    f"layer_{layer_idx}_attn_o_proj",
                     f"layer_{layer_idx}_attn",
                     f"layer_{layer_idx}_ln2",
                     f"layer_{layer_idx}_ffn",
@@ -485,8 +535,14 @@ def test_model(hf_model, model):
                         result = comparison_results[component]
                         component_name = component.split(f"layer_{layer_idx}_")[1]
                         
+                        # Add indentation for attention sub-components
+                        if component_name.startswith("attn_"):
+                            display_name = "  " + component_name.replace("attn_", "attn.")
+                        else:
+                            display_name = component_name
+                        
                         if result["status"] in ["MISSING", "SHAPE_MISMATCH"]:
-                            logging.error(f"  {component_name:<23} {result['status']:<8} {result['error']}")
+                            logging.error(f"  {display_name:<23} {result['status']:<8} {result['error']}")
                         else:
                             status = result["status"]
                             max_diff = f"{result['max_absolute_diff']:.2e}"
@@ -495,25 +551,25 @@ def test_model(hf_model, model):
                             shape = str(result["shape"])
                             
                             log_func = logging.info if status == "PASS" else logging.warning
-                            log_func(f"  {component_name:<23} {status:<8} {max_diff:<12} {mean_diff:<12} {rel_diff:<12} {shape}")
-            
-            # Summary
-            total_layers = len(comparison_results)
-            passed_layers = sum(1 for r in comparison_results.values() if r["status"] == "PASS")
-            
-            logging.info(f"\nSummary for input {i+1}:")
-            logging.info(f"Layers passed: {passed_layers}/{total_layers}")
-            logging.info(f"Final output match: {final_output_close}")
-            
-            all_results[f"input_{i+1}"] = {
-                "text": text,
-                "comparison_results": comparison_results,
-                "final_output_match": final_output_close,
-                "max_output_diff": max_output_diff,
-                "layers_passed": passed_layers,
-                "total_layers": total_layers
-            }
-            
+                            log_func(f"  {display_name:<23} {status:<8} {max_diff:<12} {mean_diff:<12} {rel_diff:<12} {shape}")
+                
+                # Summary
+                total_layers = len(comparison_results)
+                passed_layers = sum(1 for r in comparison_results.values() if r["status"] == "PASS")
+                
+                logging.info(f"\nSummary for input {i+1}:")
+                logging.info(f"Layers passed: {passed_layers}/{total_layers}")
+                logging.info(f"Final output match: {final_output_close}")
+                
+                all_results[f"input_{i+1}"] = {
+                    "text": text,
+                    "comparison_results": comparison_results,
+                    "final_output_match": final_output_close,
+                    "max_output_diff": max_output_diff,
+                    "layers_passed": passed_layers,
+                    "total_layers": total_layers
+                }
+                
         except Exception as e:
             logging.error(f"Error during testing with input {i+1}: {str(e)}")
             all_results[f"input_{i+1}"] = {"error": str(e)}

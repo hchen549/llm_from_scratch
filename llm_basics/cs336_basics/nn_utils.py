@@ -1,10 +1,11 @@
 import torch
 
 
-def softmax(x, dim=-1):
+def softmax(x, dim=-1, dtype = torch.float32):
+    x = x.to(dtype)
     rescaled_input = x - torch.max(x, dim=dim, keepdim=True)[0]
     exponentiated_rescaled_input = torch.exp(rescaled_input)
-    return exponentiated_rescaled_input / torch.sum(exponentiated_rescaled_input, dim=dim, keepdim=True)
+    return (exponentiated_rescaled_input / torch.sum(exponentiated_rescaled_input, dim=dim, keepdim=True))
 
 def log_softmax(x, dim=-1):
     x_max = torch.max(x, dim=dim, keepdim=True)[0]

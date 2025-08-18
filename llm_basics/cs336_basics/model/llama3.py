@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from .base import BaseLLM
 from ..layer import Embedding, RMSNorm, Linear, TransformerBlock, RotaryPositionalEmbeddingPytorch
 
+from transformers.models.llama.modeling_llama import LlamaAttention
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -33,8 +35,9 @@ class Llama3(BaseLLM):
                     positional_encoder=self.positional_encoder,
                     use_grouped_query_attention=True,
                     rms_norm_eps=config.rms_norm_eps,
+                    layer_idx=idx,
                 )
-                for _ in range(config.num_layers)
+                for idx in range(config.num_layers)
             ]
         )
         self.ln_final = RMSNorm(config.d_model, eps = config.rms_norm_eps)
