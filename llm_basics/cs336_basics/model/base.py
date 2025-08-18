@@ -63,6 +63,7 @@ class BasicsTransformerLM(BaseLLM):
         d_ff: int,
         rope_theta: float,
         rms_norm_eps: float,
+        use_grouped_query_attention: bool = False,
     ):
         # Store the model configuration for serialization / deserialization
         self.config = {
@@ -87,6 +88,8 @@ class BasicsTransformerLM(BaseLLM):
                     num_kv_heads=num_kv_heads,
                     d_ff=d_ff,
                     positional_encoder=self.positional_encoder,
+                    use_grouped_query_attention=use_grouped_query_attention,
+                    rms_norm_eps=rms_norm_eps,
                 )
                 for _ in range(num_layers)
             ]

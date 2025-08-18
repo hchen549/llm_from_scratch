@@ -10,13 +10,16 @@ import einx
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from jaxtyping import Float, Bool, Int
+from transformers.models.llama.modeling_llama import LlamaRMSNorm as HFRMSNorm
 
 
 from .nn_utils import softmax
 
 logger = logging.getLogger(__name__)
+
 
 
 class Linear(nn.Module):
@@ -104,7 +107,8 @@ class RMSNorm(nn.Module):
         rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         x = x * rms
 
-        return (self.weight * x).to(in_dtype)
+        # Match HuggingFace's order: convert to dtype first, then multiply by weight
+        return self.weight * x.to(in_dtype)
     
     def extra_repr(self):
         return f"hidden_size={self.weight.shape[0]}, eps={self.eps}"
@@ -151,39 +155,117 @@ class RotaryEmbedding(nn.Module):
 
 
 class RotaryPositionalEmbeddingPytorch(nn.Module):
-    def __init__(self, context_length: int, d_model: int, theta: float = 10000.0, device = None):
+    def __init__(
+        self, 
+        context_length: int, 
+        d_model: int, 
+        theta: float = 10000.0, 
+        device = None,
+        rope_type: str = "default",
+        rope_scaling: dict = None
+    ):
         super().__init__()
         self.theta = theta
         self.d_model = d_model
         self.context_length = context_length
+        self.rope_type = rope_type
+        self.rope_scaling = rope_scaling or {}
 
         assert d_model % 2 == 0
-        pair = torch.arange(0, d_model, 2).float()
-        freq = 1/theta ** (pair/d_model)
-        m = torch.arange(0, context_length)
-        angle = torch.outer(m, freq).float() # (max_seq, d_model/2)
+        
+        # Compute inverse frequencies
+        inv_freq = 1.0 / (self.theta ** (torch.arange(0, d_model, 2).float() / d_model))
+        
+        # Apply scaling if using Llama3 RoPE
+        if self.rope_type == "llama3" and self.rope_scaling:
+            inv_freq = self._apply_llama3_scaling(inv_freq)
+        
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+        # Build cache for all positions
+        self._build_cache(context_length, device)
+    
+    def _apply_llama3_scaling(self, inv_freq: torch.Tensor) -> torch.Tensor:
+        """Apply Llama3 RoPE scaling to inverse frequencies."""
+        import math
+        import numpy as np
+        
+        scaling_factor = self.rope_scaling.get('factor', 32.0)
+        low_freq_factor = self.rope_scaling.get('low_freq_factor', 1.0)
+        high_freq_factor = self.rope_scaling.get('high_freq_factor', 4.0)
+        original_max_pos = self.rope_scaling.get('original_max_position_embeddings', 8192)
+        
+        # Calculate wavelengths
+        wavelengths = 2 * math.pi / inv_freq
+        
+        # Define thresholds
+        low_wavelen_threshold = original_max_pos * 2
+        high_wavelen_threshold = original_max_pos / (2 * high_freq_factor)
+        
+        # Apply scaling based on wavelength
+        ratio = torch.ones_like(inv_freq)
+        
+        for i, wavelen in enumerate(wavelengths):
+            if wavelen < high_wavelen_threshold:
+                # High frequency: no scaling
+                ratio[i] = 1.0
+            elif wavelen > low_wavelen_threshold:
+                # Low frequency: scale by 1/factor
+                ratio[i] = 1.0 / scaling_factor
+            else:
+                # Smooth interpolation
+                t = (math.log(wavelen) - math.log(high_wavelen_threshold)) / \
+                    (math.log(low_wavelen_threshold) - math.log(high_wavelen_threshold))
+                t = np.clip(t, 0, 1)
+                # Smooth step: 3t^2 - 2t^3
+                smooth_t = t * t * (3 - 2 * t)
+                ratio[i] = 1.0 * (1 - smooth_t) + (1.0 / scaling_factor) * smooth_t
+        
+        return inv_freq * ratio
 
-        # construct a complex tensor from given absolute values and angles
-        self.positional_encoding_complex = torch.polar(abs = torch.ones_like(angle), angle = angle )
-
-        self.register_buffer("_freq_cis_cache", self.positional_encoding_complex.to(device=device), persistent=False)
+    def _build_cache(self, seq_len, device):
+        # Build cos/sin cache for all positions
+        t = torch.arange(seq_len, device=device).float()
+        freqs = torch.outer(t, self.inv_freq.to(device))
+        
+        # Create cos and sin embeddings
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+    
+    @staticmethod
+    def rotate_half(x):
+        """Rotates half the hidden dims of the input."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor):
-        # we need token postions mostly since during the generation phase
-        x_shape = x.shape
+        # x shape: [batch, heads, seq, head_dim] for attention
+        # token_positions shape: [batch, seq] or just [seq]
         
-        # the input of torch.view_as_complex is expected to have the last dimension of size 2
-        x_complex = torch.view_as_complex(x.reshape(*x_shape[:-1], -1, 2)) # (..., head_dim/2)
-
-        # Get the positional encoding for the given positions
-        freqs_cis = self._freq_cis_cache[token_positions] # (seq_len, head_dim/2)
+        # Get sequence positions
+        if token_positions.dim() == 1:
+            # If 1D, it's a sequence of positions
+            seq_positions = token_positions
+        else:
+            # If 2D [batch, seq], take first batch since positions should be same across batch
+            seq_positions = token_positions[0] if token_positions.shape[0] > 0 else token_positions.flatten()
         
-        x = x_complex * freqs_cis
-
-        x_real = torch.view_as_real(x)
-        x = x_real.reshape(*x_shape)
-
-        return x
+        # Get cos and sin for the positions
+        cos = self.cos_cached[seq_positions]  # [seq, head_dim]
+        sin = self.sin_cached[seq_positions]  # [seq, head_dim]
+        
+        # Add dimensions for proper broadcasting with x shape [batch, heads, seq, head_dim]
+        # We need to unsqueeze to get [1, 1, seq, head_dim]
+        while cos.dim() < x.dim():
+            cos = cos.unsqueeze(0)
+            sin = sin.unsqueeze(0)
+        
+        # Apply rotary embedding using HuggingFace's approach
+        x_rotated = (x * cos) + (self.rotate_half(x) * sin)
+        
+        return x_rotated
 
 
 class TransformerBlock(nn.Module):
@@ -202,6 +284,8 @@ class TransformerBlock(nn.Module):
             Dimensionality of the feed-forward inner layer (section 3.3).
         positional_encoder: RotaryEmbedding
             The RoPE module to use.
+        layer_idx: int
+            The index of this layer in the model (required for HF attention).
 
     Returns:
         FloatTensor of shape `(batch_size, sequence_length, d_model)`.
@@ -215,11 +299,13 @@ class TransformerBlock(nn.Module):
         d_ff: int,
         positional_encoder: RotaryEmbedding | RotaryPositionalEmbeddingPytorch,
         use_grouped_query_attention: bool = False,
+        rms_norm_eps: float = 1e-6,
+        layer_idx: int = 0,
     ):
         super().__init__()
 
         if use_grouped_query_attention:
-            self.attn = GroupedQueryAttention(
+            self.attn = LlamaAttention(
                 d_model=d_model,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
@@ -232,14 +318,20 @@ class TransformerBlock(nn.Module):
                 positional_encoder=positional_encoder,
             )
         self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff)
-        self.ln1 = RMSNorm(d_model)
-        self.ln2 = RMSNorm(d_model)
+        self.ln1 = RMSNorm(d_model, eps=rms_norm_eps)
+        self.ln2 = RMSNorm(d_model, eps=rms_norm_eps)
+        self.use_grouped_query_attention = use_grouped_query_attention
 
-    def forward(self, x: torch.Tensor):
+
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor | None = None, attention_mask: torch.Tensor | None = None, hf_rope_cos_sin: tuple = None):
         """
         Args:
             x: FloatTensor of shape `(batch_size, sequence_length, d_model)`.
                 The input to process with the Transformer block.
+            position_ids: Optional tensor of shape `(batch_size, sequence_length)`.
+                Position IDs for the input sequence.
+            attention_mask: Optional tensor of shape `(batch_size, sequence_length)`.
+                Attention mask for the input sequence.
 
         Returns:
             FloatTensor of shape `(batch_size, sequence_length, d_model)`.
@@ -247,7 +339,15 @@ class TransformerBlock(nn.Module):
         # NOTE: this is a pre-norm Transformer, and differs from the original
         # description in the paper.
         # Apply the multi-head self-attention sublayer
-        x_attn = self.attn(self.ln1(x))
+        # Both custom attention implementations return a single tensor
+        if self.use_grouped_query_attention and hasattr(self.attn, 'use_hf_rope') and self.attn.use_hf_rope:
+            # Pass HF RoPE cos/sin to attention
+            x_attn = self.attn(self.ln1(x), token_positions=position_ids, hf_rope_cos_sin=hf_rope_cos_sin)
+        elif position_ids is not None:
+            x_attn = self.attn(self.ln1(x), token_positions=position_ids)
+        else:
+            x_attn = self.attn(self.ln1(x))
+        
         attn_sublayer_output = x + x_attn
 
         # Apply the feed-forward sublayer
@@ -296,8 +396,8 @@ def scaled_dot_product_attention(
 
     if mask is not None:
         attention_scores = torch.where(mask, attention_scores, float("-inf"))
-
-    attention_weights = softmax(attention_scores, dim=-1)  # Softmax over the key dimension
+    
+    attention_weights = softmax(attention_scores, dim=-1, dtype = torch.float32).to(Q.dtype)
 
     return einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
 
@@ -341,7 +441,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
         self.k_proj = Linear(self.d_model, self.num_heads * self.d_k)
         self.v_proj = Linear(self.d_model, self.num_heads * self.d_v)
 
-        self.output_proj = Linear(self.num_heads * self.d_v, self.d_model)
+        self.o_proj = Linear(self.num_heads * self.d_v, self.d_model)
 
         self.positional_encoder = positional_encoder  # RoPE
 
@@ -383,7 +483,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
         causal_mask = qi >= kj  # (query, key)
 
         # Shape: (..., num_heads, sequence_length, d_k)
-        attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        attn_output = scaled_dot_product_attention(Q=Q, K=K, V=V, mask=causal_mask)
 
         # Concatenate the attention output from all heads.
         # (..., sequence_length, num_heads * d_v).
@@ -394,12 +494,13 @@ class CausalMultiHeadSelfAttention(nn.Module):
         return output
 
 def silu(x: torch.Tensor):
-    return x * torch.sigmoid(x)
+    # Use PyTorch's F.silu for exact numerical compatibility with HuggingFace
+    return F.silu(x)
 
 
-class GroupedQueryAttention(nn.Module):
+class LlamaAttention(nn.Module):
 
-    def __init__(self, d_model: int, num_heads: int, num_kv_heads: int, positional_encoder: RotaryEmbedding | RotaryPositionalEmbeddingPytorch):
+    def __init__(self, d_model: int, num_heads: int, num_kv_heads: int, positional_encoder: RotaryEmbedding | RotaryPositionalEmbeddingPytorch | None = None, use_hf_rope: bool = False):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -415,8 +516,13 @@ class GroupedQueryAttention(nn.Module):
         self.output_proj = Linear(num_heads * self.head_dim, d_model)
 
         self.positional_encoder = positional_encoder
+        self.use_hf_rope = use_hf_rope
+        
+        # If using HF RoPE, we'll get cos/sin from outside
+        self._hf_cos = None
+        self._hf_sin = None
 
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None, hf_rope_cos_sin: tuple = None):
         
         bsz, seq_len, _ = x.shape
         q = self.q_proj(x) # (b, seq, d_model)
@@ -427,14 +533,30 @@ class GroupedQueryAttention(nn.Module):
         k = k.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2) # (b, num_kv_heads, seq, d)
         v = v.view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2) # (b, num_kv_heads, seq, d)
 
-        k = torch.repeat_interleave(k, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
-        v = torch.repeat_interleave(v, repeats = self.n_rep, dim = 1) # (b, num_heads, seq, d)
-
         if token_positions is None:
             token_positions = torch.arange(seq_len, device=x.device)
 
-        q = self.positional_encoder(q, token_positions = token_positions )
-        k = self.positional_encoder(k, token_positions = token_positions )
+        # Apply RoPE BEFORE repeating KV heads (following HuggingFace implementation)
+        if self.use_hf_rope and hf_rope_cos_sin is not None:
+            # Use HuggingFace RoPE directly
+            cos, sin = hf_rope_cos_sin
+            # Import HF's apply_rotary_pos_emb
+            from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        else:
+            # Use custom RoPE
+            q = self.positional_encoder(q, token_positions = token_positions )
+            k = self.positional_encoder(k, token_positions = token_positions )
+
+        # Repeat KV heads AFTER applying RoPE using HuggingFace's method
+        # This is more efficient than repeat_interleave and matches HF's implementation
+        if self.n_rep > 1:
+            batch, num_kv_heads, slen, head_dim = k.shape
+            k = k[:, :, None, :, :].expand(batch, num_kv_heads, self.n_rep, slen, head_dim)
+            k = k.reshape(batch, num_kv_heads * self.n_rep, slen, head_dim)
+            
+            v = v[:, :, None, :, :].expand(batch, num_kv_heads, self.n_rep, slen, head_dim)
+            v = v.reshape(batch, num_kv_heads * self.n_rep, slen, head_dim)
 
         mask = 1 - torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1)
         mask = mask.bool()
@@ -442,7 +564,7 @@ class GroupedQueryAttention(nn.Module):
         attention = scaled_dot_product_attention(q, k, v, mask)
         
         # Transpose back and reshape
-        attention = attention.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attention = attention.transpose(1, 2).reshape(bsz, seq_len, -1).contiguous()
 
         output = self.output_proj(attention)
 
