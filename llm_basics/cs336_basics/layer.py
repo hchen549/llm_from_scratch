@@ -301,6 +301,7 @@ class TransformerBlock(nn.Module):
         use_grouped_query_attention: bool = False,
         rms_norm_eps: float = 1e-6,
         layer_idx: int = 0,
+        context_length: int = 1024,
     ):
         super().__init__()
 

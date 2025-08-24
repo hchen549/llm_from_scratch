@@ -258,7 +258,11 @@ class HiddenStateExtractor:
         
         def make_hook(name):
             def hook(module, input, output):
-                self.hidden_states[name] = output.detach().cpu()
+                if isinstance(output, tuple):
+                    # For transformer layers, take the first output (hidden states)
+                    self.hidden_states[name] = output[0].detach().cpu()
+                else:
+                    self.hidden_states[name] = output.detach().cpu()
             return hook
         
         def make_input_hook(name):
@@ -467,7 +471,7 @@ def test_model(hf_model, model):
             
             # Compare final outputs
             hf_logits = hf_output.logits.detach().cpu().float()
-            custom_logits = custom_output.detach().cpu().float()
+            custom_logits = custom_output.logits.detach().cpu().float()
             
             final_output_close = torch.allclose(hf_logits, custom_logits, rtol=1e-4, atol=1e-6)
             max_output_diff = (hf_logits - custom_logits).abs().max().item()
