@@ -311,8 +311,7 @@ class Llama3DirectHFRope(Llama3):
 
             scaled_logits = torch.softmax(logits/temperature, dim=-1) # (bsz, vocab_size)
             next_token_id = torch.argmax(scaled_logits, dim=-1, keepdim=True) # (bsz, 1)
-            
-            print(next_token_id)
+        
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
             
@@ -379,7 +378,6 @@ class Llama3DirectHFRopeFastInference(Llama3DirectHFRope):
             scaled_logits = torch.softmax(logits/temperature, dim=-1) # (bsz, vocab_size)
             next_token_id = torch.argmax(scaled_logits, dim=-1, keepdim=True) # (bsz, 1)
             
-            print("generated token i: ", next_token_id)
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
             
