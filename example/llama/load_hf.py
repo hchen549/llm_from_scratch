@@ -127,7 +127,7 @@ def load_hf_model():
                 source_tensor = hf_state_dict[hf_param_name]
                 param.copy_(source_tensor)
                     
-                logging.info(f"Copied {hf_param_name} -> {name}")
+                logging.debug(f"Copied {hf_param_name} -> {name}")
             else:
                 logging.warning(f"HF parameter {hf_param_name} not found in state_dict")
 
