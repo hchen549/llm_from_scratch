@@ -14,7 +14,7 @@ from example.llama.load_hf import get_parameter_mapping, get_variable_mapping, t
 logging.basicConfig(level=logging.INFO)
 
 
-def load_model(hf_model_name, model_type = "llama3_hf_rope"):
+def load_model(hf_model_name, model_type = "llama3_hf_rope", attention_type = "paged"):
      # Load HF model with eager attention for exact matching
     hf_model = AutoModelForCausalLM.from_pretrained(
         hf_model_name,
@@ -37,7 +37,7 @@ def load_model(hf_model_name, model_type = "llama3_hf_rope"):
     if model_type == "llama3_hf_rope":
         model = Llama3DirectHFRope(my_model_cfg, hf_rope)
     elif model_type == "llama3_hf_rope_fast_inference":
-        model = Llama3DirectHFRopeFastInference(my_model_cfg, hf_rope)
+        model = Llama3DirectHFRopeFastInference(my_model_cfg, hf_rope, attention_type=attention_type)
     else:
         raise ValueError(f"Model type {model_type} not supported")
     model = model.to(torch.bfloat16).cuda()
@@ -51,7 +51,7 @@ def load_model(hf_model_name, model_type = "llama3_hf_rope"):
             hf_param_name = layer_mapping[name]
             if hf_param_name in hf_state_dict:
                 param.copy_(hf_state_dict[hf_param_name])
-                logging.info(f"Copied {hf_param_name} -> {name}")
+                logging.debug(f"Copied {hf_param_name} -> {name}")
     
     return hf_model, model
 

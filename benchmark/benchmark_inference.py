@@ -16,7 +16,8 @@ class InputTokensConfig:
 @dataclass
 class ModelGenerationConfig:
     model_name: str = "meta-llama/Llama-3.2-1B-Instruct"
-    model_type: str = "llama3_hf_rope"
+    model_type: str = "llama3_hf_rope_fast_inference"
+    attention_type: str = "paged"
     output_len: int = 100
     temperature: float = 0.5
     top_p: float = 0.9
@@ -35,7 +36,7 @@ def benchmark_kvcache(generate_config: ModelGenerationConfig, input_tokens_confi
         Dictionary containing throughput statistics
     """
     print(f"Loading model: {generate_config.model_name}")
-    hf_model, model = load_model(generate_config.model_name, model_type=generate_config.model_type)
+    hf_model, model = load_model(generate_config.model_name, model_type=generate_config.model_type, attention_type=generate_config.attention_type)
     tokenizer = AutoTokenizer.from_pretrained(generate_config.model_name)
     
     # Calculate tokens generated per step
