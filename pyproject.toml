@@ -3,7 +3,7 @@ name = "llm-from-scratch"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "debugpy>=1.8.14",
     "medusa-llm>=0.1",
@@ -24,17 +24,21 @@ gpu = [
   "transformers>=4.48.0,<5.0.0",
   "bitsandbytes>=0.45.1",
   "trl>=0.13.0,<0.14.0",
-  "torch~=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-  "torch~=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
-  "torchvision~=0.21.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-  "torchvision~=0.17.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
+  "torch~=2.6.0; platform_system == 'Linux'",
+  "torchvision~=0.21.0; platform_system == 'Linux'",
+  "flash-attn==2.7.4.post1; platform_system == 'Linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.uv.sources]
-llm-basics = { path = "./llm_basics", editable = true } 
+llm-basics = { path = "./llm_basics", editable = true }
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
 
 
 [[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
