@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flash_attn import flash_attn_func
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
@@ -8,9 +9,13 @@ from .base import BaseLLM
 from ..layer import Embedding, RMSNorm, Linear, TransformerBlock, RotaryPositionalEmbeddingPytorch, SwiGLU, scaled_dot_product_attention
 
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb
-
+from transformers.utils.import_utils import _is_package_available
 import logging
 
+HAS_FLASH_ATTN = _is_package_available("flash_attn")
+# HAS_FLASH_ATTN = False
+
+BLOCK_SIZE = 512
 
 @dataclass
 class ModelOutput:
@@ -74,10 +79,13 @@ class LlamaAttentionWithHFRope(nn.Module):
         if mask is None:
             mask = ~torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()   
 
-        attn_output = scaled_dot_product_attention(q, k_repeated, v_repeated, mask = mask)
+        if HAS_FLASH_ATTN:
+            attn_output = flash_attn_func(q.transpose(1, 2), k_repeated.transpose(1, 2), v_repeated.transpose(1, 2), causal = True)
+            attn_output = attn_output.reshape(bsz, seq_len, -1)
+        else:
+            attn_output = scaled_dot_product_attention(q, k_repeated, v_repeated, mask = mask)
+            attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, -1)
         
-        # Reshape and project
-        attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.o_proj(attn_output)
         
         return output, (k, v)
@@ -126,18 +134,90 @@ def fast_attention_forward(self, x: torch.Tensor, position_ids: torch.Tensor = N
 
     else:
         k_repeated = keys
-        v_repeated = values
-
-    # get the mask of the attention
-    # if mask is not None:
-    #     mask = 
+        v_repeated = values 
 
     # apply attention
-    attn_output = scaled_dot_product_attention(q, k_repeated, v_repeated, mask = mask) # (bsz, num_heads, curr_seq_len, head_dim)
+    # attn_output = F.scaled_dot_product_attention(q, k_repeated, v_repeated, is_causal = True) # (bsz, num_heads, curr_seq_len, head_dim)
+    attn_output = scaled_dot_product_attention(q, k_repeated, v_repeated, mask = mask)
     
     attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, curr_seq_len, -1) # (bsz, curr_seq_len, d_model)
     return self.o_proj(attn_output), (keys, values)
+
+
+def fast_attention_forward_with_paged_attention(self, x: torch.Tensor, position_ids: torch.Tensor = None, past_key_values: Tuple[torch.Tensor, torch.Tensor] = None, is_first_decode: bool = False, mask: Optional[torch.Tensor] = None):
+    bsz, curr_seq_len, dim = x.shape
+
+    assert past_key_values is not None, "this function is only used for decoding"
+    assert curr_seq_len == 1, "this function is only used for decoding"
     
+    past_seq_len = past_key_values[0].shape[2] # (bsz, num_kv_heads, seq_len, head_dim)
+    new_seq_len = past_seq_len + curr_seq_len 
+
+    if is_first_decode:
+        self.kv_cache = torch.empty((BLOCK_SIZE + new_seq_len, 2, bsz, self.num_kv_heads, self.head_dim), device = x.device, dtype=x.dtype)
+        self.k_cache = self.kv_cache[:, 0]
+        self.v_cache = self.kv_cache[:, 1]
+
+        self.k_cache[:past_seq_len] = past_key_values[0].permute(2, 0, 1, 3) # (seq_len, bsz, num_kv_heads, head_dim)
+        self.v_cache[:past_seq_len] = past_key_values[1].permute(2, 0, 1, 3)
+
+    # elif new_seq_len >= self.k_cache.shape[0]:
+    #     # extend kv_cache by BLOCK_SIZE
+    #     logger.info(f"extending kv_cache by {BLOCK_SIZE}")
+    #     self.kv_cache.resize_(BLOCK_SIZE + self.k_cache.shape[0], 2, bsz, self.num_kv_heads, self.head_dim)
+    #     self.k_cache = self.kv_cache[:, 0]
+    #     self.v_cache = self.kv_cache[:, 1]
+
+    # project qkv
+    q = self.q_proj(x).view(bsz, curr_seq_len, self.num_heads, -1).transpose(1, 2) # (bsz, num_heads, curr_seq_len, head_dim)
+    k = self.k_proj(x).view(bsz, curr_seq_len, self.num_kv_heads, -1).transpose(1, 2) # (bsz, num_kv_heads, curr_seq_len, head_dim)
+    v = self.v_proj(x).view(bsz, curr_seq_len, self.num_kv_heads, -1).transpose(1, 2) # (bsz, num_kv_heads, curr_seq_len, head_dim)
+
+    # apply positional_embedding to q, k
+    if position_ids is None:
+        position_ids = torch.arange(curr_seq_len, device=x.device).unsqueeze(0)
+    
+    cos, sin = self.positional_encoder(v, position_ids)
+    q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+    # append kv to kv_cache
+    self.k_cache[past_seq_len] = k.permute(2, 0, 1, 3)  # (seq_len, bsz, num_kv_heads, head_dim)
+    self.v_cache[past_seq_len] = v.permute(2, 0, 1, 3)
+    
+    # retrieve all historical key, values
+    k_past = self.k_cache[:new_seq_len].permute(1, 2, 0, 3) # (bsz, num_kv_heads, seq_len, head_dim)
+    v_past = self.v_cache[:new_seq_len].permute(1, 2, 0, 3)
+
+    # apply gqa
+    if self.n_rep > 1:
+        k_repeated = k_past.unsqueeze(2).expand(bsz, self.num_kv_heads, self.n_rep, new_seq_len, self.head_dim).reshape(bsz, self.num_heads, new_seq_len, self.head_dim)
+        v_repeated = v_past.unsqueeze(2).expand(bsz, self.num_kv_heads, self.n_rep, new_seq_len, self.head_dim).reshape(bsz, self.num_heads, new_seq_len, self.head_dim)
+    else:
+        k_repeated = k_past
+        v_repeated = v_past
+
+    # Final sanity checks
+    # print("q shape: ", q.shape)
+    # print("k_repeated shape: ", k_repeated.shape)
+    # print("v_repeated shape: ", v_repeated.shape)
+    # assert q.size(1) == self.num_heads, "q.size(1) != num_heads"
+    # assert k_repeated.size(1) == self.num_heads, "k_repeated.size(1) != num_heads"
+    # assert v_repeated.size(1) == self.num_heads, "v_repeated.size(1) != num_heads"
+
+    # compute attention
+    attention_score = scaled_dot_product_attention(q, k_repeated, v_repeated, mask = mask)
+    # attention_score = F.scaled_dot_product_attention(q, k_repeated, v_repeated, is_causal=True) # (bsz, num_heads, seq_len, seq_len)
+    # attention_score = flash_attn_func(q, k_repeated, v_repeated, causal=True)
+    
+    # output proj
+    output = attention_score.transpose(1, 2).reshape(bsz, curr_seq_len, -1)
+    output = self.o_proj(output)
+
+    # Return the original cached keys and values (before GQA expansion)
+    return output, (k_past, v_past)
+
+
+
 def fast_llama_forward(self, x: torch.Tensor, position_ids: torch.Tensor = None, past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None, mask: Optional[torch.Tensor] = None):
     if position_ids is None:
         position_ids = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
@@ -151,14 +231,27 @@ def fast_llama_forward(self, x: torch.Tensor, position_ids: torch.Tensor = None,
 
         is_first_decode = not hasattr(layer.attn, 'kv_cache')
 
-        h_attn, kv_value = fast_attention_forward(
-            layer.attn, 
-            layer.ln1(h), 
-            position_ids=position_ids,
-            past_key_values=layer_past_kv, 
-            is_first_decode=is_first_decode,
-            mask=mask
-        )
+        if self.attention_type == "paged":
+            h_attn, kv_value = fast_attention_forward_with_paged_attention(
+                layer.attn,     
+                layer.ln1(h), 
+                position_ids=position_ids,
+                past_key_values=layer_past_kv, 
+                is_first_decode=is_first_decode,
+                mask=mask
+            )
+        elif self.attention_type == "kv_cache":
+            h_attn, kv_value = fast_attention_forward(
+                layer.attn, 
+                layer.ln1(h), 
+                position_ids=position_ids,
+                past_key_values=layer_past_kv, 
+                is_first_decode=is_first_decode,
+                mask=mask
+            )
+        else:
+            raise ValueError(f"Attention type {self.attention_type} not supported")
+        
         h = h + h_attn
         
         h_ffn = layer.ffn(layer.ln2(h))
@@ -233,6 +326,11 @@ class Llama3(BaseLLM):
         
         logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.6f}M")
         logger.info(f"number of all parameters: {self.get_num_params(False) / 1e6:.6f}M")
+
+        if HAS_FLASH_ATTN:
+            logger.info("using flash_attn")
+        else:
+            logger.info("using plain custom scaled_dot_product_attention")
         
     def forward(self, x, position_ids=None, past_key_values=None, mask=None):
         x = self.token_embeddings(x)
@@ -248,7 +346,7 @@ class Llama3(BaseLLM):
     
 
 class Llama3DirectHFRope(Llama3):
-    """Llama3 model that directly uses HF RoPE"""
+    """Llama3 model that directly uses HF RoPE and dont use kv cache"""
     
     def __init__(self, config, positional_encoder: LlamaRotaryEmbedding):
         super().__init__(config)
@@ -329,9 +427,9 @@ class Llama3DirectHFRope(Llama3):
 
     
 class Llama3DirectHFRopeFastInference(Llama3DirectHFRope):
-    """Llama3 model that directly uses HF RoPE"""
+    """Llama3 model that directly uses HF RoPE and uses kv cache for fast inference"""
     
-    def __init__(self, config, positional_encoder: LlamaRotaryEmbedding):
+    def __init__(self, config, positional_encoder: LlamaRotaryEmbedding, attention_type: str = "paged"):
         super().__init__(config, positional_encoder)
         
         
@@ -351,6 +449,7 @@ class Llama3DirectHFRopeFastInference(Llama3DirectHFRope):
         # Final layer norm and output
         self.ln_final = RMSNorm(config.d_model, eps=config.rms_norm_eps)
         self.lm_head = Linear(config.d_model, config.vocab_size)
+        self.attention_type = attention_type
         
     
     def forward(self, x: torch.Tensor, 

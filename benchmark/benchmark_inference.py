@@ -16,11 +16,12 @@ class InputTokensConfig:
 @dataclass
 class ModelGenerationConfig:
     model_name: str = "meta-llama/Llama-3.2-1B-Instruct"
-    model_type: str = "llama3_hf_rope"
+    model_type: str = "llama3_hf_rope_fast_inference"
+    attention_type: str = "paged"
     output_len: int = 100
     temperature: float = 0.5
     top_p: float = 0.9
-    eos_token_id: int = None
+    eos_token_id: int = None # set to None to disable early stop
     warm_up_steps: int = 10
     num_steps: int = 10
 
@@ -35,7 +36,7 @@ def benchmark_kvcache(generate_config: ModelGenerationConfig, input_tokens_confi
         Dictionary containing throughput statistics
     """
     print(f"Loading model: {generate_config.model_name}")
-    hf_model, model = load_model(generate_config.model_name, model_type=generate_config.model_type)
+    hf_model, model = load_model(generate_config.model_name, model_type=generate_config.model_type, attention_type=generate_config.attention_type)
     tokenizer = AutoTokenizer.from_pretrained(generate_config.model_name)
     
     # Calculate tokens generated per step
@@ -49,6 +50,8 @@ def benchmark_kvcache(generate_config: ModelGenerationConfig, input_tokens_confi
     print(f"  Warm-up steps: {generate_config.warm_up_steps}")
     print(f"  Benchmark steps: {generate_config.num_steps}")
     print(f"  Temperature: {generate_config.temperature}, Top-p: {generate_config.top_p}")
+    print(f"  Attention type: {generate_config.attention_type}")
+    print(f"  Model type: {generate_config.model_type}")
     
     # Warm up
     print(f"\nWarming up for {generate_config.warm_up_steps} steps...")
@@ -67,11 +70,15 @@ def benchmark_kvcache(generate_config: ModelGenerationConfig, input_tokens_confi
     step_times: List[float] = []
     step_throughputs: List[float] = []
     
+    
+    torch.cuda.synchronize()  # <-- sync
     total_start_time = time.time()
     
     for i in range(generate_config.num_steps):
         input_tokens = generate_input_tokens(tokenizer, input_tokens_config).cuda()
         
+        # Ensure previous work (and the H->D copy above) is done before starting the step timer
+        torch.cuda.synchronize()  # <-- sync
         step_start_time = time.time()
         output_tokens = model.generate(
             input_tokens, 
@@ -80,6 +87,8 @@ def benchmark_kvcache(generate_config: ModelGenerationConfig, input_tokens_confi
             generate_config.top_p, 
             eos_token_id=generate_config.eos_token_id
         )
+
+        torch.cuda.synchronize()  # <-- sync
         step_end_time = time.time()
         
         step_time = step_end_time - step_start_time
