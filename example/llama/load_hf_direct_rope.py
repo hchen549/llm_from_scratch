@@ -19,7 +19,7 @@ def load_model(hf_model_name, model_type = "llama3_hf_rope", attention_type = "p
     hf_model = AutoModelForCausalLM.from_pretrained(
         hf_model_name,
         torch_dtype=torch.bfloat16,
-        attn_implementation="eager"
+        attn_implementation="flash_attention_2", # eager or flash_attention_2
     ).cuda()
     
     # Get HF RoPE
