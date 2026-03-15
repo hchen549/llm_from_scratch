@@ -1,8 +1,10 @@
 import math
+import os
 import time
 
 import torch
 import torch.nn as nn
+from torch.profiler import profile, ProfilerActivity, record_function, schedule
 
 from .dataloader import create_dataloaders
 from .model import SimpleMLP
@@ -37,29 +39,41 @@ def train_one_epoch(
     min_lr: float,
     warmup_steps: int,
     total_steps: int,
+    prof: profile | None = None,
 ) -> tuple[float, int]:
     model.train()
     total_loss = 0.0
     num_batches = 0
 
     for x, y in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+        with record_function("H2D_Transfer"):
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
         # Update learning rate
         lr = get_cosine_lr(global_step, max_lr, min_lr, warmup_steps, total_steps)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        optimizer.zero_grad()
-        logits = model(x)
-        loss = criterion(logits, y)
-        loss.backward()
-        optimizer.step()
+        with record_function("Forward"):
+            optimizer.zero_grad()
+            logits = model(x)
+
+        with record_function("Loss"):
+            loss = criterion(logits, y)
+
+        with record_function("Backward"):
+            loss.backward()
+
+        with record_function("Optimizer_Step"):
+            optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
         global_step += 1
+
+        if prof is not None:
+            prof.step()
 
     avg_loss = total_loss / num_batches
     return avg_loss, global_step
@@ -106,6 +120,10 @@ def main():
     in_features = 784
     num_classes = 10
 
+    # Profiler output directory
+    trace_dir = os.path.join(os.path.dirname(__file__), "traces")
+    os.makedirs(trace_dir, exist_ok=True)
+
     # --- Setup ---
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -137,39 +155,69 @@ def main():
     print(f"Total steps: {total_steps}, warmup steps: {warmup_steps}")
     print("-" * 60)
 
+    # --- Profiler setup ---
+    # Profile at batch granularity: skip 2 batches (CUDA warm-up),
+    # 3 batches profiler warm-up, then actively record 25 batches.
+    profiler_schedule = schedule(
+        wait=2,  # skip 2 batches (CUDA context init, JIT)
+        warmup=3,  # profiler overhead stabilises (discarded)
+        active=25,  # record 25 batches into the trace
+        repeat=1,
+    )
+
+    activities = [ProfilerActivity.CPU]
+    if device.type == "cuda":
+        activities.append(ProfilerActivity.CUDA)
+
+    trace_path: str = os.path.join(trace_dir, "training_trace.json")
+
+    def trace_handler(p):
+        p.export_chrome_trace(trace_path)
+        print(f"\n[Profiler] Chrome trace exported → {trace_path}")
+        print("[Profiler] Open with: https://ui.perfetto.dev  or  chrome://tracing")
+
     # --- Training loop ---
     global_step = 0
     start_time = time.time()
 
-    for epoch in range(1, num_epochs + 1):
-        train_loss, global_step = train_one_epoch(
-            model,
-            train_loader,
-            optimizer,
-            criterion,
-            device,
-            epoch,
-            global_step,
-            max_lr,
-            min_lr,
-            warmup_steps,
-            total_steps,
-        )
+    with profile(
+        activities=activities,
+        schedule=profiler_schedule,
+        on_trace_ready=trace_handler,
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as prof:
+        for epoch in range(1, num_epochs + 1):
+            train_loss, global_step = train_one_epoch(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                device,
+                epoch,
+                global_step,
+                max_lr,
+                min_lr,
+                warmup_steps,
+                total_steps,
+                prof=prof,
+            )
 
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+            val_loss, val_acc = evaluate(model, val_loader, criterion, device)
 
-        current_lr = get_cosine_lr(
-            global_step, max_lr, min_lr, warmup_steps, total_steps
-        )
-        elapsed = time.time() - start_time
-        print(
-            f"Epoch {epoch:3d}/{num_epochs} | "
-            f"train_loss: {train_loss:.4f} | "
-            f"val_loss: {val_loss:.4f} | "
-            f"val_acc: {val_acc:.2%} | "
-            f"lr: {current_lr:.2e} | "
-            f"time: {elapsed:.1f}s"
-        )
+            current_lr = get_cosine_lr(
+                global_step, max_lr, min_lr, warmup_steps, total_steps
+            )
+            elapsed = time.time() - start_time
+            print(
+                f"Epoch {epoch:3d}/{num_epochs} | "
+                f"train_loss: {train_loss:.4f} | "
+                f"val_loss: {val_loss:.4f} | "
+                f"val_acc: {val_acc:.2%} | "
+                f"lr: {current_lr:.2e} | "
+                f"time: {elapsed:.1f}s"
+            )
 
     print("-" * 60)
     print("Training complete.")
